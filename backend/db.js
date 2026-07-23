@@ -172,16 +172,20 @@ function addMonths(dateStr, n) {
   return d.toISOString().slice(0, 10);
 }
 
+// "2026-06-18" -> "June 2026" — mirrors the frontend's monthYearLabel (App.jsx).
+function monthYearLabel(dateStr) {
+  const d = new Date(dateStr + "T00:00:00");
+  return d.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+}
+
 function generateInstallments(frequency, startDue, amount) {
   const cfg = FREQ_CONFIG[frequency] || FREQ_CONFIG.monthly;
   const amt = Number(amount) || 0;
-  return Array.from({ length: cfg.count }, (_, i) => ({
-    period: `${cfg.label} ${i + 1}`,
-    due: addMonths(startDue, i * cfg.monthsApart),
-    amount: amt,
-    paid: false,
-    paidDate: null,
-  }));
+  return Array.from({ length: cfg.count }, (_, i) => {
+    const due = addMonths(startDue, i * cfg.monthsApart);
+    const period = cfg === FREQ_CONFIG.monthly ? monthYearLabel(due) : `${cfg.label} ${i + 1} · ${monthYearLabel(due)}`;
+    return { period, due, amount: amt, paid: false, paidDate: null };
+  });
 }
 
 export const db = {
@@ -345,7 +349,7 @@ export const db = {
         await safeRollback(client);
         return { error: "not_installment_plan" };
       }
-      const startDue = (s.installments && s.installments[0] && s.installments[0].due) || s.due;
+      const startDue = s.due || (s.installments && s.installments[0] && s.installments[0].due);
       const installments = generateInstallments(s.frequency, startDue, s.installmentAmount);
       const total = installments.reduce((a, i) => a + Number(i.amount || 0), 0);
       const { rows: updated } = await client.query(
