@@ -304,10 +304,10 @@ function GoogleGate({ onLoggedIn }) {
           FL
         </div>
         <div style={{ fontSize: 19, fontWeight: 700, color: "#1D1D1F", marginBottom: 6, letterSpacing: -0.3 }}>Fee Ledger</div>
-        <p style={{ fontSize: 12.5, color: "var(--text-mute)", marginBottom: 22, lineHeight: 1.5 }}>Sign in with a Google account authorized for this ledger.</p>
+        <p style={{ fontSize: 12.5, color: "#86868B", marginBottom: 22, lineHeight: 1.5 }}>Sign in with a Google account authorized for this ledger.</p>
         <div ref={btnRef} style={{ display: "flex", justifyContent: "center" }} />
-        {!GOOGLE_CLIENT_ID && <p style={{ color: "var(--over)", fontSize: 12, marginTop: 14 }}>VITE_GOOGLE_CLIENT_ID is not set — see .env.example</p>}
-        {error && <p style={{ color: "var(--over)", fontSize: 12.5, marginTop: 14 }}>{error}</p>}
+        {!GOOGLE_CLIENT_ID && <p style={{ color: "#D70015", fontSize: 12, marginTop: 14 }}>VITE_GOOGLE_CLIENT_ID is not set — see .env.example</p>}
+        {error && <p style={{ color: "#D70015", fontSize: 12.5, marginTop: 14 }}>{error}</p>}
       </div>
     </div>
   );
@@ -336,6 +336,7 @@ function FeeLedger({ user, onLogout }) {
   });
   useEffect(() => {
     localStorage.setItem("fee-ledger-theme", darkMode ? "dark" : "light");
+    document.body.style.background = darkMode ? "#000000" : "#F5F5F7";
   }, [darkMode]);
   const [students, setStudents] = useState([]);
   const [reminders, setReminders] = useState([]);
