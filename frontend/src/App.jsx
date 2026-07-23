@@ -61,17 +61,26 @@ function addMonths(dateStr, n) {
   return d.toISOString().slice(0, 10);
 }
 
+// "2026-06-18" -> "June 2026". Used to label installments by actual calendar
+// month/year (derived from each installment's due date) instead of a generic
+// "Month 1" / "Month 2" counter.
+function monthYearLabel(dateStr) {
+  const d = new Date(dateStr + "T00:00:00");
+  return d.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+}
+
 // Pure function: builds an installment schedule. frequency drives count/spacing.
 function generateInstallments(planType, frequency, startDue, amount) {
   const cfg = FREQ_CONFIG[frequency] || FREQ_CONFIG.monthly;
   const amt = Number(amount) || 0;
-  return Array.from({ length: cfg.count }, (_, i) => ({
-    period: `${cfg.label} ${i + 1}`,
-    due: addMonths(startDue, i * cfg.monthsApart),
-    amount: amt,
-    paid: false,
-    paidDate: null,
-  }));
+  return Array.from({ length: cfg.count }, (_, i) => {
+    const due = addMonths(startDue, i * cfg.monthsApart);
+    // Monthly installments are just labeled by their calendar month ("June 2026").
+    // Quarterly/biannual keep their period number too, since one calendar month
+    // alone doesn't convey "this is installment 2 of 4".
+    const period = cfg === FREQ_CONFIG.monthly ? monthYearLabel(due) : `${cfg.label} ${i + 1} · ${monthYearLabel(due)}`;
+    return { period, due, amount: amt, paid: false, paidDate: null };
+  });
 }
 
 // Marks installments paid sequentially (in order) until paidTotal is exhausted.
@@ -637,10 +646,33 @@ function FeeLedger({ user, onLogout }) {
       const total = installments.reduce((a, i) => a + Number(i.amount || 0), 0);
       payload = { ...base, planType: plan.planType, frequency: plan.frequency, installmentAmount: Number(newStudent.installmentAmount), due: newStudent.due, total, paid: 0, installments };
     } else {
-      // Editing an existing installment-plan student: update plan settings only.
-      // The schedule itself is only rebuilt via the explicit "Regenerate schedule" action,
-      // so in-progress paid marks aren't silently wiped by a routine edit.
-      payload = { ...base, planType: plan.planType, frequency: plan.frequency, installmentAmount: Number(newStudent.installmentAmount) };
+      // Editing an existing installment-plan student. If the plan type, frequency,
+      // amount, or start date actually changed, the old schedule no longer matches
+      // (different count/spacing/amount) — e.g. switching Monthly -> Quarterly used
+      // to leave the old 12-entry monthly schedule sitting untouched underneath a
+      // "Quarterly · 4" badge. Rebuild it now instead of leaving that stale, so the
+      // badge, the schedule modal, and the totals all agree with each other.
+      // If nothing plan-related changed (just name/class/phone etc.), leave the
+      // schedule and paid marks untouched.
+      const original = students.find((x) => x.id === editingId);
+      const newAmount = Number(newStudent.installmentAmount);
+      const planChanged =
+        !original ||
+        original.planType !== plan.planType ||
+        original.frequency !== plan.frequency ||
+        Number(original.installmentAmount) !== newAmount ||
+        original.due !== newStudent.due;
+
+      if (planChanged) {
+        if (!window.confirm("Changing the plan type, amount, or start date rebuilds the payment schedule and clears any paid marks. Continue?")) {
+          return;
+        }
+        const installments = generateInstallments(plan.planType, plan.frequency, newStudent.due, newStudent.installmentAmount);
+        const total = installments.reduce((a, i) => a + Number(i.amount || 0), 0);
+        payload = { ...base, planType: plan.planType, frequency: plan.frequency, installmentAmount: newAmount, due: newStudent.due, total, paid: 0, installments };
+      } else {
+        payload = { ...base, planType: plan.planType, frequency: plan.frequency, installmentAmount: newAmount };
+      }
     }
 
     setSavingStudent(true);
@@ -666,9 +698,14 @@ function FeeLedger({ user, onLogout }) {
 
   function openEdit(s) {
     setEditingId(s.id);
+    // For an installment plan, `s.due` (as passed in from the ledger row) has
+    // already been recomputed to the *next unpaid* installment's due date, not
+    // the schedule's original start date. The edit form's "First installment
+    // due date" field means the latter, so pull it straight from the schedule.
+    const firstDue = isInstallmentPlan(s) && s.installments && s.installments[0] ? s.installments[0].due : s.due;
     setNewStudent({
       name: s.name, cls: s.cls, school: s.school, phone: s.phone,
-      total: String(s.total), paid: String(s.paid), due: s.due,
+      total: String(s.total), paid: String(s.paid), due: firstDue,
       planSelect: planSelectValue(s.planType, s.frequency),
       installmentAmount: s.installmentAmount ? String(s.installmentAmount) : "",
     });
@@ -1379,7 +1416,7 @@ function FeeLedger({ user, onLogout }) {
                   <input type="number" value={newStudent.installmentAmount} onChange={(e) => setNewStudent({ ...newStudent, installmentAmount: e.target.value })} />
                 </div>
                 <div className="field"><label>First installment due date</label><input type="date" value={newStudent.due} onChange={(e) => setNewStudent({ ...newStudent, due: e.target.value })} /></div>
-                {editingId && <p style={{ fontSize: 12, color: "var(--text-mute)", marginTop: -4, marginBottom: 12 }}>Saving here only updates the plan settings. To rebuild the schedule itself, use "Regenerate schedule" from the Schedule view.</p>}
+                {editingId && <p style={{ fontSize: 12, color: "var(--text-mute)", marginTop: -4, marginBottom: 12 }}>Changing the plan type, amount, or start date here rebuilds the payment schedule and clears paid marks. Other edits (name, class, phone) leave the schedule untouched.</p>}
               </>
             )}
             <button className="btn btn-primary" style={{ width: "100%", justifyContent: "center", opacity: savingStudent ? 0.6 : 1 }} disabled={savingStudent} onClick={saveStudent}>{savingStudent ? "Saving…" : editingId ? "Save changes" : "Add to ledger"}</button>
