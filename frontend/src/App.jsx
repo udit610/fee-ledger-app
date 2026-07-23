@@ -40,7 +40,7 @@ function planSelectValue(planType, frequency) {
   return "full";
 }
 
-const FONT_IMPORT = `@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600&family=Inter:wght@400;500;600;700;800&display=swap');`;
+const FONT_IMPORT = `@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@500;600&family=Inter:wght@400;500;600;700;800&display=swap');`;
 
 const money = (n) => "₹" + Number(n || 0).toLocaleString("en-IN");
 const todayISO = () => new Date().toISOString().slice(0, 10);
@@ -302,18 +302,19 @@ function GoogleGate({ onLoggedIn }) {
         }
       },
     });
-    window.google.accounts.id.renderButton(btnRef.current, { theme: "filled_blue", size: "large", shape: "pill" });
+    window.google.accounts.id.renderButton(btnRef.current, { theme: "filled_black", size: "large", shape: "pill" });
   }, []);
 
   return (
-    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, background: "#F5F5F7" }}>
+    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, background: "#F6F4FB" }}>
       <style>{`${FONT_IMPORT}`}</style>
-      <div style={{ background: "#fff", border: "1px solid #E5E5EA", borderRadius: 16, padding: 32, width: "100%", maxWidth: 340, textAlign: "center", fontFamily: "-apple-system, BlinkMacSystemFont, 'Inter', sans-serif", boxShadow: "0 1px 2px rgba(0,0,0,0.04)" }}>
-        <div style={{ width: 40, height: 40, borderRadius: 11, background: "#1D1D1F", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 16px", fontWeight: 700, fontSize: 15, letterSpacing: -0.3 }}>
+      <div style={{ background: "#fff", border: "1px solid #E7E4EF", borderRadius: 16, padding: 32, width: "100%", maxWidth: 340, textAlign: "center", fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, sans-serif", boxShadow: "0 1px 2px rgba(11,11,12,0.05)" }}>
+        <div style={{ position: "relative", width: 40, height: 40, borderRadius: 11, background: "#0B0B0C", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 16px", fontWeight: 700, fontSize: 14, letterSpacing: -0.2, fontFamily: "'Space Grotesk', sans-serif", overflow: "hidden" }}>
           FL
+          <div style={{ position: "absolute", left: 0, right: 0, bottom: 0, height: 3, background: "#C6FF33" }} />
         </div>
-        <div style={{ fontSize: 19, fontWeight: 700, color: "#1D1D1F", marginBottom: 6, letterSpacing: -0.3 }}>Fee Ledger</div>
-        <p style={{ fontSize: 12.5, color: "#86868B", marginBottom: 22, lineHeight: 1.5 }}>Sign in with a Google account authorized for this ledger.</p>
+        <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 19, fontWeight: 700, color: "#0B0B0C", marginBottom: 6, letterSpacing: -0.2 }}>Fee Ledger</div>
+        <p style={{ fontSize: 12.5, color: "#85838E", marginBottom: 22, lineHeight: 1.5 }}>Sign in with a Google account authorized for this ledger.</p>
         <div ref={btnRef} style={{ display: "flex", justifyContent: "center" }} />
         {!GOOGLE_CLIENT_ID && <p style={{ color: "#D70015", fontSize: 12, marginTop: 14 }}>VITE_GOOGLE_CLIENT_ID is not set — see .env.example</p>}
         {error && <p style={{ color: "#D70015", fontSize: 12.5, marginTop: 14 }}>{error}</p>}
@@ -331,7 +332,7 @@ export default function App() {
     api.me().then((r) => setUser(r.user)).catch(() => setUser(null));
   }, []);
 
-  if (user === undefined) return <div style={{ minHeight: "100vh", background: "#F5F5F7" }} />;
+  if (user === undefined) return <div style={{ minHeight: "100vh", background: "#F6F4FB" }} />;
   if (!user) return <GoogleGate onLoggedIn={setUser} />;
   return <FeeLedger user={user} onLogout={() => { api.logout().finally(() => setUser(null)); }} />;
 }
@@ -345,7 +346,7 @@ function FeeLedger({ user, onLogout }) {
   });
   useEffect(() => {
     localStorage.setItem("fee-ledger-theme", darkMode ? "dark" : "light");
-    document.body.style.background = darkMode ? "#000000" : "#F5F5F7";
+    document.body.style.background = darkMode ? "#000000" : "#F6F4FB";
   }, [darkMode]);
   const [students, setStudents] = useState([]);
   const [reminders, setReminders] = useState([]);
@@ -919,7 +920,7 @@ function FeeLedger({ user, onLogout }) {
     }
   }
 
-  if (!loaded) return <div style={{ minHeight: "100vh", background: "#F5F5F7" }} />;
+  if (!loaded) return <div style={{ minHeight: "100vh", background: "#F6F4FB" }} />;
 
   return (
     <div className={`wrap${darkMode ? " dark" : ""}`}>
@@ -927,45 +928,49 @@ function FeeLedger({ user, onLogout }) {
         ${FONT_IMPORT}
         * { box-sizing: border-box; -webkit-font-smoothing: antialiased; }
         :root {
-          --sans: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'Inter', sans-serif;
-          --mono: ui-monospace, -apple-system, 'SF Mono', 'IBM Plex Mono', Menlo, monospace;
-          --bg: #F5F5F7; --card: #ffffff; --card-alt: #FAFAFA;
-          --ink: #1D1D1F; --text-soft: #6E6E73; --text-mute: #86868B;
-          --line: #E5E5EA; --line-strong: #D2D2D7;
-          --surface-hover: #ECECEE; --row-hover: #FBFBFC;
-          --header-bg: rgba(255,255,255,0.82); --menu-bg: rgba(255,255,255,0.96); --stat-bg: rgba(255,255,255,0.9);
-          --accent: #0071E3; --accent-dark: #0058B0; --accent-tint: rgba(0,113,227,0.1);
-          --paid: #248A3D; --paid-bg: rgba(52,199,89,0.13);
-          --due: #C93400; --due-bg: rgba(255,149,0,0.14);
+          --sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+          --display: 'Space Grotesk', var(--sans);
+          --mono: 'IBM Plex Mono', ui-monospace, -apple-system, 'SF Mono', Menlo, monospace;
+          --bg: #F6F4FB; --card: #ffffff; --card-alt: #FAFAF8;
+          --ink: #0B0B0C; --text-soft: #57565F; --text-mute: #85838E;
+          --line: #E7E4EF; --line-strong: #D6D2E4;
+          --surface-hover: #EFEBF9; --row-hover: #FBFAFD;
+          --header-bg: rgba(255,255,255,0.86); --menu-bg: rgba(255,255,255,0.97); --stat-bg: rgba(255,255,255,0.92);
+          --accent: #7D39EB; --accent-dark: #5E1FC7; --accent-hover: #6423D6; --accent-tint: rgba(125,57,235,0.1);
+          --highlight: #C6FF33; --highlight-ink: #3D5300; --highlight-tint: rgba(198,255,51,0.22);
+          --paid: #3D5300; --paid-bg: rgba(198,255,51,0.28);
+          --due: #B8590A; --due-bg: rgba(255,159,10,0.16);
           --over: #D70015; --over-bg: rgba(255,59,48,0.12);
           --whatsapp: #25D366;
-          --overlay: rgba(0,0,0,0.35);
+          --overlay: rgba(11,11,12,0.4);
         }
         .wrap.dark {
           color-scheme: dark;
-          --bg: #000000; --card: #1C1C1E; --card-alt: #2C2C2E;
-          --ink: #F5F5F7; --text-soft: #AEAEB2; --text-mute: #8E8E93;
-          --line: #38383A; --line-strong: #48484A;
-          --surface-hover: #2C2C2E; --row-hover: #232325;
-          --header-bg: rgba(28,28,30,0.82); --menu-bg: rgba(44,44,46,0.96); --stat-bg: rgba(28,28,30,0.92);
-          --accent: #0A84FF; --accent-dark: #409CFF; --accent-tint: rgba(10,132,255,0.16);
-          --paid: #30D158; --paid-bg: rgba(48,209,88,0.16);
+          --bg: #000000; --card: #19161F; --card-alt: #241F2C;
+          --ink: #F5F5F7; --text-soft: #B4AFC0; --text-mute: #8E8996;
+          --line: #322C3B; --line-strong: #423A4E;
+          --surface-hover: #241F2C; --row-hover: #1D1922;
+          --header-bg: rgba(10,8,13,0.86); --menu-bg: rgba(25,22,31,0.97); --stat-bg: rgba(20,17,26,0.92);
+          --accent: #A874FF; --accent-dark: #C6A6FF; --accent-hover: #9358F5; --accent-tint: rgba(168,116,255,0.18);
+          --highlight: #C6FF33; --highlight-ink: #1B2400; --highlight-tint: rgba(198,255,51,0.16);
+          --paid: #C6FF33; --paid-bg: rgba(198,255,51,0.16);
           --due: #FF9F0A; --due-bg: rgba(255,159,10,0.16);
           --over: #FF453A; --over-bg: rgba(255,69,58,0.16);
-          --overlay: rgba(0,0,0,0.6);
+          --overlay: rgba(0,0,0,0.65);
         }
         @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
 
         .wrap { min-height: 100vh; background: var(--bg); font-family: var(--sans); color: var(--ink); padding-bottom: 60px; -webkit-font-smoothing: antialiased; }
-        h1,h2,h3 { font-family: var(--sans); }
+        h1,h2,h3 { font-family: var(--display); }
         .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
         a { color: inherit; }
 
         .header { background: var(--header-bg); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border-bottom: 1px solid var(--line); color: var(--ink); padding: 20px 24px 18px; position: relative; }
         .header-top { display:flex; align-items:center; justify-content:space-between; gap: 12px; flex-wrap: wrap; }
         .brand { display:flex; align-items:center; gap:10px; }
-        .brand-mark { width: 34px; height: 34px; border-radius: 9px; background: var(--accent); color: #fff; display:flex; align-items:center; justify-content:center; font-family: var(--sans); font-weight:700; font-size: 14px; letter-spacing: -0.3px; }
-        .brand-title { font-family: var(--sans); font-size: 19px; font-weight:700; letter-spacing: -0.3px; color: var(--ink); }
+        .brand-mark { position:relative; width: 34px; height: 34px; border-radius: 9px; background: #0B0B0C; color: #fff; display:flex; align-items:center; justify-content:center; font-family: var(--display); font-weight:700; font-size: 13px; letter-spacing: -0.2px; overflow:hidden; }
+        .brand-mark::after { content:""; position:absolute; left:0; right:0; bottom:0; height:3px; background: var(--highlight); }
+        .brand-title { font-family: var(--display); font-size: 19px; font-weight:700; letter-spacing: -0.2px; color: var(--ink); }
         .brand-sub { font-size: 12px; color: var(--text-mute); letter-spacing: 0px; margin-top: 1px; }
 
         .user-chip { display:flex; align-items:center; gap:8px; background: var(--bg); border:1px solid var(--line); padding: 4px 5px; border-radius: 999px; transition: background 0.15s ease; }
@@ -989,10 +994,12 @@ function FeeLedger({ user, onLogout }) {
         .dropdown-item.active { color: var(--accent); font-weight: 600; }
         .dropdown-item.active svg { color: var(--accent); }
 
-        /* Signature element: a quiet, confident collection meter — plain track, single accent fill, numbers do the talking */
+        /* Signature element: the collection meter. A near-black track with a violet->lime
+           fill reads like a "charge level" for money collected — the one bold, branded
+           moment on an otherwise quiet, functional page. */
         .meter-row { display:flex; align-items:baseline; gap: 12px; margin-top: 22px; }
-        .meter-track { flex:1; height: 6px; border-radius: 999px; background: var(--line); overflow:hidden; position: relative; align-self: center; }
-        .meter-fill { height: 100%; background: var(--accent); border-radius: 999px; transition: width 0.6s cubic-bezier(0.22,1,0.36,1); }
+        .meter-track { flex:1; height: 8px; border-radius: 999px; background: color-mix(in srgb, var(--ink) 10%, transparent); overflow:hidden; position: relative; align-self: center; }
+        .meter-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--highlight)); border-radius: 999px; transition: width 0.6s cubic-bezier(0.22,1,0.36,1); }
         .meter-label { font-size: 12px; color: var(--text-mute); white-space: nowrap; }
         .meter-pct { font-family: var(--mono); font-size: 17px; font-weight: 700; color: var(--ink); white-space: nowrap; letter-spacing: -0.3px; }
 
@@ -1005,7 +1012,7 @@ function FeeLedger({ user, onLogout }) {
         .stat-value { font-family: var(--mono); font-size: 19px; font-weight: 700; color: var(--ink); letter-spacing: -0.3px; }
         .stat-value.amber { color: var(--due); } .stat-value.red { color: var(--over); }
 
-        .note-banner { background: var(--accent-tint); border:1px solid rgba(0,113,227,0.18); color: var(--accent-dark); font-size:12.5px; line-height: 1.5; border-radius:10px; padding:10px 14px; margin: 14px 20px 0; max-width:1040px; margin-left:auto; margin-right:auto; }
+        .note-banner { background: var(--accent-tint); border:1px solid rgba(125,57,235,0.22); color: var(--accent-dark); font-size:12.5px; line-height: 1.5; border-radius:10px; padding:10px 14px; margin: 14px 20px 0; max-width:1040px; margin-left:auto; margin-right:auto; }
         .digest-banner { display:flex; align-items:center; justify-content:space-between; gap: 12px; flex-wrap:wrap; background: var(--over-bg); border:1px solid rgba(255,59,48,0.2); color:#8E0010; font-size:12.5px; line-height: 1.5; border-radius:10px; padding:10px 14px; margin: 10px 20px 0; max-width:1040px; margin-left:auto; margin-right:auto; }
         .digest-text strong { color: var(--over); }
 
@@ -1020,13 +1027,13 @@ function FeeLedger({ user, onLogout }) {
         /* Segmented control — iOS-style status filter */
         .segmented { display:flex; background: var(--bg); border: 1px solid var(--line); padding: 2px; border-radius: 9px; gap: 2px; }
         .segmented button { border:none; background:transparent; padding: 7px 11px; font-size: 12.5px; font-weight: 500; color: var(--text-soft); border-radius: 7px; cursor: pointer; transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease; white-space: nowrap; }
-        .segmented button.active { background: var(--card); color: var(--ink); font-weight: 600; box-shadow: 0 1px 3px rgba(0,0,0,0.12); }
+        .segmented button.active { background: var(--card); color: var(--accent); font-weight: 600; box-shadow: 0 1px 3px rgba(11,11,12,0.12); }
         .view-tabs { margin-top: 18px; display: inline-flex; }
 
         .btn { border:none; border-radius:8px; padding:8px 14px; font-size:13.5px; font-weight:600; display:flex; align-items:center; gap:6px; cursor:pointer; white-space:nowrap; transition: opacity 0.12s ease, background 0.15s ease; font-family: var(--sans); }
         .btn:active { opacity: 0.75; }
         .btn-primary { background: var(--accent); color: #fff; }
-        .btn-primary:hover { background: #0077ED; }
+        .btn-primary:hover { background: var(--accent-hover); }
         .btn-whatsapp { background: var(--whatsapp); color:#fff; }
         .btn-whatsapp:hover { background: #21BD5C; }
         .btn-ghost { background: var(--bg); color: var(--ink); border:1px solid var(--line); }
@@ -1068,7 +1075,7 @@ function FeeLedger({ user, onLogout }) {
         .modal { background: var(--card); width:100%; max-width:480px; border-radius: 16px 16px 0 0; padding:20px; max-height:88vh; overflow:auto; animation: slideUp 0.22s cubic-bezier(0.22,1,0.36,1); border: 1px solid var(--line); }
         @media (min-width:720px) { .modal { border-radius:16px; } }
         .modal-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; }
-        .modal-title { font-family: var(--sans); font-size:18px; font-weight:700; color: var(--ink); letter-spacing: -0.3px; }
+        .modal-title { font-family: var(--display); font-size:18px; font-weight:700; color: var(--ink); letter-spacing: -0.2px; }
         .field { margin-bottom: 12px; }
         .field label { font-size:12px; font-weight:600; color:var(--text-soft); display:block; margin-bottom:5px; }
         .field input, .field select { width:100%; border:1px solid var(--line); border-radius:8px; padding:9px 11px; font-size:14px; font-family: var(--sans); background: var(--card); color: var(--ink); transition: border-color 0.15s ease; }
@@ -1082,7 +1089,7 @@ function FeeLedger({ user, onLogout }) {
 
         .toast { position:fixed; bottom:18px; left:50%; transform:translateX(-50%); background: rgba(29,29,31,0.94); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); color: #fff; padding:11px 18px; border-radius:12px; font-size:13.5px; display:flex; align-items:center; gap:8px; z-index:60; box-shadow: 0 12px 28px rgba(0,0,0,0.25); animation: toastIn 0.2s cubic-bezier(0.22,1,0.36,1); }
         @keyframes toastIn { from { transform: translate(-50%, 10px); opacity: 0; } to { transform: translate(-50%, 0); opacity: 1; } }
-        .toast.warn { background: rgba(201,52,0,0.94); }
+        .toast.warn { background: rgba(184,89,10,0.94); }
         .toast-action { background: rgba(255,255,255,0.2); border:none; color:#fff; font-weight:600; font-size:12.5px; padding:5px 10px; border-radius:7px; cursor:pointer; margin-left: 4px; }
         .toast-action:hover { background: rgba(255,255,255,0.3); }
 
