@@ -5,8 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Fee Ledger</title>
     <script src="https://accounts.google.com/gsi/client" async defer></script>
+    <style>
+      /* Global reset: without this, the browser's default 8px body margin and white
+         background peek out around the app's own background on every page, since
+         the app only paints inside its own root div, not the raw <html>/<body>. */
+      html, body { margin: 0; padding: 0; background: #F5F5F7; }
+      #root { min-height: 100vh; }
+    </style>
   </head>
-  
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.jsx"></script>
