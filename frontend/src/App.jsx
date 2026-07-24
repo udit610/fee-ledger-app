@@ -454,8 +454,22 @@ function FeeLedger({ user, onLogout }) {
   }, []);
 
   useEffect(() => {
-    Promise.all([api.getStudents(), api.getReminders(), api.getExpenses()])
-      .then(([s, r, e]) => { setStudents(s); setReminders(r); setExpenses(e); })
+    // Collector accounts are now blocked from GET /api/reminders (admin-only "no
+    // reports" restriction) — skip that call for them entirely, otherwise
+    // Promise.all's fail-fast behavior would sink students/expenses too the moment
+    // reminders comes back 403, which is exactly what caused "No students yet" to
+    // show up for a collector account that has real data on the server.
+    const calls = isCollector ? [api.getStudents(), api.getExpenses()] : [api.getStudents(), api.getReminders(), api.getExpenses()];
+    Promise.all(calls)
+      .then((results) => {
+        setStudents(results[0]);
+        if (isCollector) {
+          setExpenses(results[1]);
+        } else {
+          setReminders(results[1]);
+          setExpenses(results[2]);
+        }
+      })
       .catch(() => setToast({ kind: "warn", text: "Couldn't reach the server." }))
       .finally(() => setLoaded(true));
   }, []);
