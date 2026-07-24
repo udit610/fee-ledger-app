@@ -353,7 +353,7 @@ export const db = {
       const installments = generateInstallments(s.frequency, startDue, s.installmentAmount);
       const total = installments.reduce((a, i) => a + Number(i.amount || 0), 0);
       const { rows: updated } = await client.query(
-        "UPDATE students SET installments = $1, total = $2, paid = 0 WHERE id = $3 RETURNING *",
+        "UPDATE students SET installments = $1, total = $2, paid = 0, payments = '[]' WHERE id = $3 RETURNING *",
         [JSON.stringify(installments), total, id]
       );
       await client.query("COMMIT");
