@@ -334,6 +334,46 @@ function GoogleGate({ onLoggedIn }) {
 
 // ---------------- Main app ----------------
 
+// Themed replacement for native <select> in toolbars: native <option> popups are
+// rendered by the OS and ignore the app's CSS (always shows up as a plain white/blue
+// list regardless of theme). This reuses the same dropdown-wrap/menu/item styling
+// already used for the "All Schools" selector, so it matches the rest of the UI in
+// both light and dark mode.
+function Dropdown({ value, options, onChange, triggerClassName }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    function onDocClick(e) {
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+    }
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, []);
+  const current = options.find((o) => o.value === value);
+  return (
+    <div className="dropdown-wrap" ref={ref}>
+      <button type="button" className={triggerClassName || "pill-select"} onClick={() => setOpen((o) => !o)}>
+        {current ? current.label : ""}
+      </button>
+      {open && (
+        <div className="dropdown-menu">
+          {options.map((o) => (
+            <button
+              key={o.value}
+              type="button"
+              className={`dropdown-item ${o.value === value ? "active" : ""}`}
+              onClick={() => { onChange(o.value); setOpen(false); }}
+            >
+              {o.label}
+              {o.value === value && <Check size={14} />}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function App() {
   const [user, setUser] = useState(undefined); // undefined = checking, null = signed out
 
@@ -1277,19 +1317,26 @@ function FeeLedger({ user, onLogout }) {
                 ))}
               </div>
               {availableClasses.length > 2 && (
-                <select className="pill-select" value={classFilter} onChange={(e) => setClassFilter(e.target.value)}>
-                  {availableClasses.map((c) => <option key={c} value={c}>{c === "All Classes" ? "All classes" : c}</option>)}
-                </select>
+                <Dropdown
+                  value={classFilter}
+                  onChange={setClassFilter}
+                  options={availableClasses.map((c) => ({ value: c, label: c === "All Classes" ? "All classes" : c }))}
+                />
               )}
-              <select className="pill-select" value={planFilter} onChange={(e) => setPlanFilter(e.target.value)}>
-                <option value="all">All plans</option>
-                {PLAN_SELECT_OPTIONS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
-              </select>
-              <select className="pill-select" value={sortBy} onChange={(e) => setSortBy(e.target.value)}>
-                <option value="name">Sort: Name</option>
-                <option value="overdue">Sort: Most overdue</option>
-                <option value="balance">Sort: Highest balance</option>
-              </select>
+              <Dropdown
+                value={planFilter}
+                onChange={setPlanFilter}
+                options={[{ value: "all", label: "All plans" }, ...PLAN_SELECT_OPTIONS.map((p) => ({ value: p.value, label: p.label }))]}
+              />
+              <Dropdown
+                value={sortBy}
+                onChange={setSortBy}
+                options={[
+                  { value: "name", label: "Sort: Name" },
+                  { value: "overdue", label: "Sort: Most overdue" },
+                  { value: "balance", label: "Sort: Highest balance" },
+                ]}
+              />
               <button className="btn btn-ghost" onClick={() => exportLedger(students)}><Download size={15} /> Export</button>
               <button className="btn btn-ghost" onClick={() => setShowReports(true)}><BarChart3 size={15} /> Reports</button>
               <button className="btn btn-ghost" onClick={() => setShowHistory(true)}><History size={15} /> History</button>
