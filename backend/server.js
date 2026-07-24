@@ -10,6 +10,7 @@ const {
   GOOGLE_CLIENT_ID,
   ALLOWED_EMAILS = "",
   ALLOWED_EMAIL_SCHOOLS = "",
+  ALLOWED_EMAIL_ROLES = "",
   JWT_SECRET,
   FRONTEND_URL = "http://localhost:5173",
   PORT = 4000,
@@ -38,6 +39,24 @@ if (ALLOWED_EMAIL_SCHOOLS) {
 }
 function schoolsFor(email) {
   return emailSchoolMap[email] || null; // null = no restriction, sees everything
+}
+
+// Optional per-email role scoping. Set ALLOWED_EMAIL_ROLES to a JSON object like:
+//   {"cashier@gmail.com": "collector"}
+// Emails NOT listed here (but present in ALLOWED_EMAILS) default to "admin" — so existing
+// accounts keep full access exactly as before with zero config changes required. "collector"
+// accounts can only record fee payments and log expenses; every other route is admin-only.
+let emailRoleMap = {};
+if (ALLOWED_EMAIL_ROLES) {
+  try {
+    const parsed = JSON.parse(ALLOWED_EMAIL_ROLES);
+    Object.keys(parsed).forEach((e) => (emailRoleMap[e.trim().toLowerCase()] = parsed[e]));
+  } catch {
+    console.error("ALLOWED_EMAIL_ROLES is set but is not valid JSON — ignoring it.");
+  }
+}
+function roleFor(email) {
+  return emailRoleMap[email] === "collector" ? "collector" : "admin";
 }
 
 const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
@@ -89,7 +108,7 @@ app.post("/api/auth/google", h(async (req, res) => {
     return res.status(403).json({ error: "This Google account is not authorized for this ledger" });
   }
 
-  const user = { email, name: payload.name, picture: payload.picture, schools: schoolsFor(email) };
+  const user = { email, name: payload.name, picture: payload.picture, schools: schoolsFor(email), role: roleFor(email) };
   const token = jwt.sign(user, JWT_SECRET, { expiresIn: "14d" });
   res.cookie("session", token, cookieOpts);
   res.json({ user });
@@ -122,6 +141,16 @@ function requireAuth(req, res, next) {
   }
 }
 
+// Blocks "collector" accounts from anything beyond recording fee payments and
+// logging expenses. Must run after requireAuth. Unlisted/legacy sessions default
+// to role "admin" (see roleFor above), so this is a no-op for existing accounts.
+function requireAdmin(req, res, next) {
+  if (req.user.role === "collector") {
+    return res.status(403).json({ error: "This account can only record payments and expenses." });
+  }
+  next();
+}
+
 // Blocks a request whose `school` (or `students[].school`) falls outside the caller's allowed schools.
 function assertSchoolAllowed(req, res, school) {
   const schools = req.user.schools;
@@ -141,7 +170,7 @@ app.get("/api/students", requireAuth, h(async (req, res) => {
   res.json(schools ? all.filter((s) => schools.includes(s.school)) : all);
 }));
 
-app.post("/api/students", requireAuth, h(async (req, res) => {
+app.post("/api/students", requireAuth, requireAdmin, h(async (req, res) => {
   const { name, cls, school, phone, total, paid, due, planType, frequency, installmentAmount, installments } = req.body;
   if (!name || !total || !due) return res.status(400).json({ error: "name, total, and due are required" });
   if (!assertSchoolAllowed(req, res, school)) return;
@@ -164,7 +193,7 @@ app.post("/api/students", requireAuth, h(async (req, res) => {
   res.status(201).json(await db.addStudent(student));
 }));
 
-app.post("/api/students/bulk-import", requireAuth, h(async (req, res) => {
+app.post("/api/students/bulk-import", requireAuth, requireAdmin, h(async (req, res) => {
   const { students } = req.body;
   if (!Array.isArray(students)) return res.status(400).json({ error: "students must be an array" });
   const schools = req.user.schools;
@@ -193,7 +222,7 @@ app.post("/api/students/bulk-import", requireAuth, h(async (req, res) => {
 // Fields worth tracking in the audit trail. Noisy/bulky fields (installments, payments) are excluded.
 const AUDIT_FIELDS = ["name", "cls", "school", "phone", "total", "paid", "due", "planType", "frequency", "installmentAmount"];
 
-app.put("/api/students/:id", requireAuth, h(async (req, res) => {
+app.put("/api/students/:id", requireAuth, requireAdmin, h(async (req, res) => {
   const all = await db.getStudents();
   const existing = all.find((s) => s.id === req.params.id);
   if (!existing) return res.status(404).json({ error: "Student not found" });
@@ -248,7 +277,7 @@ app.post("/api/students/:id/installments/:period/pay", requireAuth, h(async (req
 
 // Also atomic — rebuilds the schedule server-side (same lock pattern) instead of
 // trusting a client-computed installments array. See db.js for details.
-app.post("/api/students/:id/regenerate-schedule", requireAuth, h(async (req, res) => {
+app.post("/api/students/:id/regenerate-schedule", requireAuth, requireAdmin, h(async (req, res) => {
   const all = await db.getStudents();
   const existing = all.find((s) => s.id === req.params.id);
   if (!existing) return res.status(404).json({ error: "Student not found" });
@@ -259,7 +288,7 @@ app.post("/api/students/:id/regenerate-schedule", requireAuth, h(async (req, res
   res.json(result.student);
 }));
 
-app.delete("/api/students/:id", requireAuth, h(async (req, res) => {
+app.delete("/api/students/:id", requireAuth, requireAdmin, h(async (req, res) => {
   const all = await db.getStudents();
   const existing = all.find((s) => s.id === req.params.id);
   if (existing && !assertSchoolAllowed(req, res, existing.school)) return;
@@ -269,13 +298,13 @@ app.delete("/api/students/:id", requireAuth, h(async (req, res) => {
 
 // ---------- Reminders ----------
 
-app.get("/api/reminders", requireAuth, h(async (req, res) => {
+app.get("/api/reminders", requireAuth, requireAdmin, h(async (req, res) => {
   const all = await db.getReminders();
   const schools = req.user.schools;
   res.json(schools ? all.filter((r) => schools.includes(r.school)) : all);
 }));
 
-app.post("/api/reminders", requireAuth, h(async (req, res) => {
+app.post("/api/reminders", requireAuth, requireAdmin, h(async (req, res) => {
   const { studentId, name, school, phone, balance, message } = req.body;
   if (!assertSchoolAllowed(req, res, school)) return;
   const entry = {
@@ -315,7 +344,7 @@ app.post("/api/expenses", requireAuth, h(async (req, res) => {
   res.status(201).json(await db.addExpense(expense));
 }));
 
-app.put("/api/expenses/:id", requireAuth, h(async (req, res) => {
+app.put("/api/expenses/:id", requireAuth, requireAdmin, h(async (req, res) => {
   const all = await db.getExpenses();
   const existing = all.find((e) => e.id === req.params.id);
   if (!existing) return res.status(404).json({ error: "Expense not found" });
@@ -339,7 +368,7 @@ app.put("/api/expenses/:id", requireAuth, h(async (req, res) => {
   res.json(updated);
 }));
 
-app.delete("/api/expenses/:id", requireAuth, h(async (req, res) => {
+app.delete("/api/expenses/:id", requireAuth, requireAdmin, h(async (req, res) => {
   const all = await db.getExpenses();
   const existing = all.find((e) => e.id === req.params.id);
   if (existing && !assertSchoolAllowed(req, res, existing.school)) return;
@@ -352,7 +381,7 @@ app.delete("/api/expenses/:id", requireAuth, h(async (req, res) => {
 // back up; restoring only ever overwrites the caller's own school scope
 // unless they're an unrestricted (all-schools) account.
 
-app.get("/api/backup", requireAuth, h(async (req, res) => {
+app.get("/api/backup", requireAuth, requireAdmin, h(async (req, res) => {
   const data = await db.exportAll();
   const schools = req.user.schools;
   if (schools) {
@@ -364,7 +393,7 @@ app.get("/api/backup", requireAuth, h(async (req, res) => {
   res.json(data);
 }));
 
-app.post("/api/backup/restore", requireAuth, h(async (req, res) => {
+app.post("/api/backup/restore", requireAuth, requireAdmin, h(async (req, res) => {
   const { students, reminders, expenses = [] } = req.body || {};
   if (!Array.isArray(students) || !Array.isArray(reminders)) {
     return res.status(400).json({ error: "Backup file must contain students[] and reminders[] arrays" });
@@ -406,12 +435,12 @@ function requireUnrestricted(req, res) {
   return true;
 }
 
-app.get("/api/backups", requireAuth, h(async (req, res) => {
+app.get("/api/backups", requireAuth, requireAdmin, h(async (req, res) => {
   if (!requireUnrestricted(req, res)) return;
   res.json(await db.listSnapshots());
 }));
 
-app.get("/api/backups/:id", requireAuth, h(async (req, res) => {
+app.get("/api/backups/:id", requireAuth, requireAdmin, h(async (req, res) => {
   if (!requireUnrestricted(req, res)) return;
   const data = await db.getSnapshot(req.params.id);
   if (!data) return res.status(404).json({ error: "Snapshot not found" });
@@ -419,7 +448,7 @@ app.get("/api/backups/:id", requireAuth, h(async (req, res) => {
   res.json(data);
 }));
 
-app.post("/api/backups/:id/restore", requireAuth, h(async (req, res) => {
+app.post("/api/backups/:id/restore", requireAuth, requireAdmin, h(async (req, res) => {
   if (!requireUnrestricted(req, res)) return;
   const data = await db.getSnapshot(req.params.id);
   if (!data) return res.status(404).json({ error: "Snapshot not found" });
