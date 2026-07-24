@@ -290,7 +290,7 @@ export const db = {
   // could be based on stale data) — it just says "mark this one period paid" and the
   // database does the read-modify-write atomically, so concurrent marks can't clobber
   // each other no matter how close together they happen.
-  async markInstallmentPaid(id, period) {
+  async markInstallmentPaid(id, period, method = "cash") {
     await ready;
     const client = await pool.connect();
     try {
@@ -314,7 +314,7 @@ export const db = {
         i.period === period ? { ...i, paid: true, paidDate: new Date().toISOString() } : i
       );
       const paid = installments.filter((i) => i.paid).reduce((a, i) => a + Number(i.amount || 0), 0);
-      const payments = [...(s.payments || []), { amount: inst.amount, date: new Date().toISOString(), note: inst.period }];
+      const payments = [...(s.payments || []), { amount: inst.amount, date: new Date().toISOString(), note: inst.period, method }];
       const { rows: updated } = await client.query(
         "UPDATE students SET installments = $1, paid = $2, payments = $3 WHERE id = $4 RETURNING *",
         [JSON.stringify(installments), paid, JSON.stringify(payments), id]
