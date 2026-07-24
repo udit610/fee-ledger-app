@@ -1422,15 +1422,21 @@ function FeeLedger({ user, onLogout }) {
                 <input placeholder="Search expenses..." value={expenseQuery} onChange={(e) => setExpenseQuery(e.target.value)} />
               </div>
               {availableExpenseCategories.length > 2 && (
-                <select className="pill-select" value={expenseCategoryFilter} onChange={(e) => setExpenseCategoryFilter(e.target.value)}>
-                  {availableExpenseCategories.map((c) => <option key={c} value={c}>{c === "All Categories" ? "All categories" : c}</option>)}
-                </select>
+                <Dropdown
+                  value={expenseCategoryFilter}
+                  onChange={setExpenseCategoryFilter}
+                  options={availableExpenseCategories.map((c) => ({ value: c, label: c === "All Categories" ? "All categories" : c }))}
+                />
               )}
-              <select className="pill-select" value={expenseSortBy} onChange={(e) => setExpenseSortBy(e.target.value)}>
-                <option value="date">Sort: Date</option>
-                <option value="amount">Sort: Highest amount</option>
-                <option value="category">Sort: Category</option>
-              </select>
+              <Dropdown
+                value={expenseSortBy}
+                onChange={setExpenseSortBy}
+                options={[
+                  { value: "date", label: "Sort: Date" },
+                  { value: "amount", label: "Sort: Highest amount" },
+                  { value: "category", label: "Sort: Category" },
+                ]}
+              />
               <button className="btn btn-ghost" onClick={() => exportExpenses(filteredExpenses)}><Download size={15} /> Export</button>
               <button className="btn btn-primary" onClick={() => setShowAddExpense(true)}><Plus size={15} /> Add Expense</button>
             </div>
