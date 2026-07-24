@@ -239,7 +239,8 @@ app.post("/api/students/:id/installments/:period/pay", requireAuth, h(async (req
   const existing = all.find((s) => s.id === req.params.id);
   if (!existing) return res.status(404).json({ error: "Student not found" });
   if (!assertSchoolAllowed(req, res, existing.school)) return;
-  const result = await db.markInstallmentPaid(req.params.id, req.params.period);
+  const method = req.body.method === "upi_bank" ? "upi_bank" : "cash";
+  const result = await db.markInstallmentPaid(req.params.id, req.params.period, method);
   if (result.error === "not_found") return res.status(404).json({ error: "Student not found" });
   if (result.error === "period_not_found") return res.status(404).json({ error: "That installment doesn't exist on this student" });
   res.json(result.student);
