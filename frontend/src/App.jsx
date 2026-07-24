@@ -679,7 +679,7 @@ function FeeLedger({ user, onLogout }) {
         }
         const installments = generateInstallments(plan.planType, plan.frequency, newStudent.due, newStudent.installmentAmount);
         const total = installments.reduce((a, i) => a + Number(i.amount || 0), 0);
-        payload = { ...base, planType: plan.planType, frequency: plan.frequency, installmentAmount: newAmount, due: newStudent.due, total, paid: 0, installments };
+        payload = { ...base, planType: plan.planType, frequency: plan.frequency, installmentAmount: newAmount, due: newStudent.due, total, paid: 0, installments, payments: [] };
       } else {
         payload = { ...base, planType: plan.planType, frequency: plan.frequency, installmentAmount: newAmount };
       }
