@@ -388,6 +388,7 @@ export default function App() {
 
 function FeeLedger({ user, onLogout }) {
   const allowedSchools = user.schools && user.schools.length ? user.schools : SCHOOLS;
+  const isCollector = user.role === "collector"; // restricted account: can only record payments and log expenses
   const [darkMode, setDarkMode] = useState(() => {
     const saved = localStorage.getItem("fee-ledger-theme");
     if (saved) return saved === "dark";
@@ -1253,39 +1254,47 @@ function FeeLedger({ user, onLogout }) {
 
         {view === "ledger" ? (
           <>
-            <div className="meter-row">
-              <span className="meter-label">Collected</span>
-              <div className="meter-track">
-                <div className="meter-fill" style={{ width: `${collectionPct}%` }} />
-              </div>
-              <span className="meter-pct mono">{collectionPct}%</span>
-            </div>
+            {!isCollector && (
+              <>
+                <div className="meter-row">
+                  <span className="meter-label">Collected</span>
+                  <div className="meter-track">
+                    <div className="meter-fill" style={{ width: `${collectionPct}%` }} />
+                  </div>
+                  <span className="meter-pct mono">{collectionPct}%</span>
+                </div>
 
-            <div className="stats-row">
-              <div className="stat-card"><div className="stat-label">Students</div><div className="stat-value">{stats.count}</div></div>
-              <div className="stat-card"><div className="stat-label">Collected</div><div className="stat-value">{money(stats.collected)}</div></div>
-              <div className="stat-card"><div className="stat-label">Balance due</div><div className="stat-value amber">{money(stats.totalDue)}</div></div>
-              <div className="stat-card"><div className="stat-label">Overdue</div><div className="stat-value red">{stats.overdue}</div></div>
-              <div className="stat-card wide"><div className="stat-label">Collected this month</div><div className="stat-value">{money(thisMonthCollected)}</div></div>
-            </div>
+                <div className="stats-row">
+                  <div className="stat-card"><div className="stat-label">Students</div><div className="stat-value">{stats.count}</div></div>
+                  <div className="stat-card"><div className="stat-label">Collected</div><div className="stat-value">{money(stats.collected)}</div></div>
+                  <div className="stat-card"><div className="stat-label">Balance due</div><div className="stat-value amber">{money(stats.totalDue)}</div></div>
+                  <div className="stat-card"><div className="stat-label">Overdue</div><div className="stat-value red">{stats.overdue}</div></div>
+                  <div className="stat-card wide"><div className="stat-label">Collected this month</div><div className="stat-value">{money(thisMonthCollected)}</div></div>
+                </div>
+              </>
+            )}
           </>
         ) : (
-          <div className="stats-row">
-            <div className="stat-card"><div className="stat-label">Total spent</div><div className="stat-value">{money(expenseStats.totalSpent)}</div></div>
-            <div className="stat-card"><div className="stat-label">Spent this month</div><div className="stat-value">{money(expenseStats.spentThisMonth)}</div></div>
-            <div className="stat-card"><div className="stat-label">Net this month</div><div className={`stat-value ${expenseStats.netThisMonth < 0 ? "red" : ""}`}>{money(expenseStats.netThisMonth)}</div></div>
-            <div className="stat-card"><div className="stat-label">Categories</div><div className="stat-value">{expenseStats.categories}</div></div>
-          </div>
+          !isCollector && (
+            <div className="stats-row">
+              <div className="stat-card"><div className="stat-label">Total spent</div><div className="stat-value">{money(expenseStats.totalSpent)}</div></div>
+              <div className="stat-card"><div className="stat-label">Spent this month</div><div className="stat-value">{money(expenseStats.spentThisMonth)}</div></div>
+              <div className="stat-card"><div className="stat-label">Net this month</div><div className={`stat-value ${expenseStats.netThisMonth < 0 ? "red" : ""}`}>{money(expenseStats.netThisMonth)}</div></div>
+              <div className="stat-card"><div className="stat-label">Categories</div><div className="stat-value">{expenseStats.categories}</div></div>
+            </div>
+          )
         )}
       </div>
 
       {view === "ledger" ? (
         <>
-          <div className="note-banner">
-            Tap a green WhatsApp icon to open a pre-filled reminder — one tap per parent. Signed in as {user.email}, stored on your own server.
-          </div>
+          {!isCollector && (
+            <div className="note-banner">
+              Tap a green WhatsApp icon to open a pre-filled reminder — one tap per parent. Signed in as {user.email}, stored on your own server.
+            </div>
+          )}
 
-          {(digest.dueSoon.length > 0 || digest.overdue.length > 0) && (
+          {!isCollector && (digest.dueSoon.length > 0 || digest.overdue.length > 0) && (
             <div className="digest-banner">
               <div className="digest-text">
                 <strong>Today:</strong>{" "}
@@ -1337,14 +1346,17 @@ function FeeLedger({ user, onLogout }) {
                   { value: "balance", label: "Sort: Highest balance" },
                 ]}
               />
-              <button className="btn btn-ghost" onClick={() => exportLedger(students)}><Download size={15} /> Export</button>
-              <button className="btn btn-ghost" onClick={() => setShowReports(true)}><BarChart3 size={15} /> Reports</button>
-              <button className="btn btn-ghost" onClick={() => setShowHistory(true)}><History size={15} /> History</button>
-              <button className="btn btn-ghost" onClick={() => setShowBackup(true)}><DatabaseBackup size={15} /> Backup</button>
-              <button className="btn btn-whatsapp" onClick={() => { selectAllUnpaid(); setShowReminderPanel(true); }}><MessageCircle size={15} /> Send Reminders</button>
-              <button className="btn btn-ghost" onClick={() => setShowImport(true)}><FileSpreadsheet size={15} /> Import Excel</button>
-              <button className="btn btn-primary" onClick={() => setShowAdd(true)}><Plus size={15} /> Add Student</button>
-            </div>
+              {!isCollector && (
+                <>
+                  <button className="btn btn-ghost" onClick={() => exportLedger(students)}><Download size={15} /> Export</button>
+                  <button className="btn btn-ghost" onClick={() => setShowReports(true)}><BarChart3 size={15} /> Reports</button>
+                  <button className="btn btn-ghost" onClick={() => setShowHistory(true)}><History size={15} /> History</button>
+                  <button className="btn btn-ghost" onClick={() => setShowBackup(true)}><DatabaseBackup size={15} /> Backup</button>
+                  <button className="btn btn-whatsapp" onClick={() => { selectAllUnpaid(); setShowReminderPanel(true); }}><MessageCircle size={15} /> Send Reminders</button>
+                  <button className="btn btn-ghost" onClick={() => setShowImport(true)}><FileSpreadsheet size={15} /> Import Excel</button>
+                  <button className="btn btn-primary" onClick={() => setShowAdd(true)}><Plus size={15} /> Add Student</button>
+                </>
+              )}            </div>
           </div>
 
           <div className="content">
@@ -1369,7 +1381,11 @@ function FeeLedger({ user, onLogout }) {
                 const totalCount = installment ? (s.installments || []).length : 0;
                 return (
                   <div className="row" key={s.id}>
-                    <input type="checkbox" className="checkbox" checked={selected.has(s.id)} onChange={() => toggleSelect(s.id)} disabled={s.status === "paid"} />
+                    {isCollector ? (
+                      <div />
+                    ) : (
+                      <input type="checkbox" className="checkbox" checked={selected.has(s.id)} onChange={() => toggleSelect(s.id)} disabled={s.status === "paid"} />
+                    )}
                     <div className="avatar" style={{ background: meta.bg, color: meta.color }}>{initials(s.name)}</div>
                     <div>
                       <div className="row-name">{s.name}</div>
@@ -1389,7 +1405,7 @@ function FeeLedger({ user, onLogout }) {
                       </div>
                       <StampBadge status={s.status} />
                       <div className="row-actions">
-                        {balance > 0 && s.phone && (
+                        {!isCollector && balance > 0 && s.phone && (
                           <a className="icon-btn" title="Send WhatsApp now" href={waLink(s.phone, defaultTemplate(s))} target="_blank" rel="noreferrer" onClick={() => logSingleReminder(s)}>
                             <MessageCircle size={14} />
                           </a>
@@ -1399,8 +1415,12 @@ function FeeLedger({ user, onLogout }) {
                             <IndianRupee size={14} />
                           </button>
                         )}
-                        <button className="icon-btn" title="Edit" onClick={() => openEdit(s)}><Pencil size={14} /></button>
-                        <button className="icon-btn" title="Remove" onClick={() => removeStudent(s.id)}><Trash2 size={14} /></button>
+                        {!isCollector && (
+                          <>
+                            <button className="icon-btn" title="Edit" onClick={() => openEdit(s)}><Pencil size={14} /></button>
+                            <button className="icon-btn" title="Remove" onClick={() => removeStudent(s.id)}><Trash2 size={14} /></button>
+                          </>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -1411,9 +1431,11 @@ function FeeLedger({ user, onLogout }) {
         </>
       ) : (
         <>
-          <div className="note-banner">
-            Track school spending alongside fee collection — see the "Net this month" figure above for collected minus spent.
-          </div>
+          {!isCollector && (
+            <div className="note-banner">
+              Track school spending alongside fee collection — see the "Net this month" figure above for collected minus spent.
+            </div>
+          )}
 
           <div className="toolbar">
             <div className="toolbar-card">
@@ -1437,7 +1459,7 @@ function FeeLedger({ user, onLogout }) {
                   { value: "category", label: "Sort: Category" },
                 ]}
               />
-              <button className="btn btn-ghost" onClick={() => exportExpenses(filteredExpenses)}><Download size={15} /> Export</button>
+              {!isCollector && <button className="btn btn-ghost" onClick={() => exportExpenses(filteredExpenses)}><Download size={15} /> Export</button>}
               <button className="btn btn-primary" onClick={() => setShowAddExpense(true)}><Plus size={15} /> Add Expense</button>
             </div>
           </div>
@@ -1469,8 +1491,12 @@ function FeeLedger({ user, onLogout }) {
                       <div className="amt-balance">{money(e.amount)}</div>
                     </div>
                     <div className="row-actions">
-                      <button className="icon-btn" title="Edit" onClick={() => openEditExpense(e)}><Pencil size={14} /></button>
-                      <button className="icon-btn" title="Remove" onClick={() => removeExpense(e.id)}><Trash2 size={14} /></button>
+                      {!isCollector && (
+                        <>
+                          <button className="icon-btn" title="Edit" onClick={() => openEditExpense(e)}><Pencil size={14} /></button>
+                          <button className="icon-btn" title="Remove" onClick={() => removeExpense(e.id)}><Trash2 size={14} /></button>
+                        </>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -1718,9 +1744,11 @@ function FeeLedger({ user, onLogout }) {
                 </div>
               ))}
             </div>
-            <button className="btn btn-ghost" style={{ width: "100%", justifyContent: "center" }} onClick={() => regenerateSchedule(scheduleStudent.id)}>
-              Regenerate schedule
-            </button>
+            {!isCollector && (
+              <button className="btn btn-ghost" style={{ width: "100%", justifyContent: "center" }} onClick={() => regenerateSchedule(scheduleStudent.id)}>
+                Regenerate schedule
+              </button>
+            )}
           </div>
         </div>
       )}
