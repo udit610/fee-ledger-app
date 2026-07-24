@@ -587,9 +587,9 @@ function FeeLedger({ user, onLogout }) {
     setShowReminderPanel(false);
   }
 
-  async function recordPayment(id, amount) {
+  async function recordPayment(id, amount, method) {
     try {
-      const updated = await api.recordPayment(id, amount);
+      const updated = await api.recordPayment(id, amount, method);
       setStudents((prev) => prev.map((s) => (s.id === id ? updated : s)));
       setPayModal(null);
       setToast({ kind: "ok", text: "Payment recorded." });
@@ -650,6 +650,18 @@ function FeeLedger({ user, onLogout }) {
     let payload;
     if (!isInstallment) {
       payload = { ...base, planType: "full", frequency: null, total: newStudent.total, paid: newStudent.paid, due: newStudent.due };
+      if (editingId) {
+        // Editing "Already paid" directly (rather than through Record Payment) used to
+        // desync the payments log from the paid total — e.g. reducing paid to correct a
+        // mistake wouldn't reduce "Collected this month", since that figure is summed
+        // straight from the payments log, not from paid. Log the difference as an
+        // adjustment entry so the log and the paid total always agree.
+        const original = students.find((x) => x.id === editingId);
+        const delta = Number(newStudent.paid || 0) - Number(original?.paid || 0);
+        if (delta !== 0) {
+          payload.payments = [...(original?.payments || []), { amount: delta, date: new Date().toISOString(), note: "adjustment" }];
+        }
+      }
     } else if (!editingId) {
       // New installment-plan student: generate the schedule now.
       const installments = generateInstallments(plan.planType, plan.frequency, newStudent.due, newStudent.installmentAmount);
@@ -1551,7 +1563,7 @@ function FeeLedger({ user, onLogout }) {
             <div className="modal-head"><div className="modal-title">Payment history</div><button className="icon-btn" onClick={() => setHistoryStudent(null)}><X size={16} /></button></div>
             <p style={{ fontSize: 13, color: "var(--text-soft)", marginBottom: 12 }}>{historyStudent.name} · {money(historyStudent.paid)} paid of {money(historyStudent.total)}</p>
             {(historyStudent.payments || []).slice().reverse().map((p, i) => (
-              <div className="history-item" key={i}><div className="history-top"><span className="mono">{money(p.amount)}</span><span className="history-time">{new Date(p.date).toLocaleString()}</span></div></div>
+              <div className="history-item" key={i}><div className="history-top"><span className="mono">{money(p.amount)}</span><span className="history-time">{new Date(p.date).toLocaleString()}</span></div>{p.method && <div style={{ fontSize: 11.5, color: "var(--text-mute)" }}>{p.method === "upi_bank" ? "UPI / Bank" : "Cash"}</div>}</div>
             ))}
             {(historyStudent.payments || []).length === 0 && <p style={{ fontSize: 12.5, color: "var(--text-mute)" }}>No payments logged yet.</p>}
 
@@ -1578,7 +1590,7 @@ function FeeLedger({ user, onLogout }) {
           <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 380 }}>
             <div className="modal-head"><div className="modal-title">Record payment</div><button className="icon-btn" onClick={() => setPayModal(null)}><X size={16} /></button></div>
             <p style={{ fontSize: 13, marginBottom: 12 }}>{payModal.name} owes <strong>{money(payModal.total - payModal.paid)}</strong>.</p>
-            <PaymentForm student={payModal} onSubmit={(amt) => recordPayment(payModal.id, amt)} />
+            <PaymentForm student={payModal} onSubmit={(amt, method) => recordPayment(payModal.id, amt, method)} />
           </div>
         </div>
       )}
@@ -1785,10 +1797,32 @@ function FeeLedger({ user, onLogout }) {
 
 function PaymentForm({ student, onSubmit }) {
   const [amt, setAmt] = useState(student.total - student.paid);
+  const [method, setMethod] = useState("cash");
   return (
     <div>
       <div className="field"><label>Amount received (₹)</label><input type="number" value={amt} onChange={(e) => setAmt(Number(e.target.value))} /></div>
-      <button className="btn btn-primary" style={{ width: "100%", justifyContent: "center" }} onClick={() => onSubmit(amt)}><Check size={15} /> Record {amt ? money(amt) : "payment"}</button>
+      <div className="field">
+        <label>Payment method</label>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button
+            type="button"
+            className={method === "cash" ? "btn btn-primary" : "btn btn-ghost"}
+            style={{ flex: 1, justifyContent: "center" }}
+            onClick={() => setMethod("cash")}
+          >
+            Cash
+          </button>
+          <button
+            type="button"
+            className={method === "upi_bank" ? "btn btn-primary" : "btn btn-ghost"}
+            style={{ flex: 1, justifyContent: "center" }}
+            onClick={() => setMethod("upi_bank")}
+          >
+            UPI / Bank
+          </button>
+        </div>
+      </div>
+      <button className="btn btn-primary" style={{ width: "100%", justifyContent: "center" }} onClick={() => onSubmit(amt, method)}><Check size={15} /> Record {amt ? money(amt) : "payment"}</button>
     </div>
   );
 }
