@@ -254,7 +254,7 @@ export const db = {
     return rows[0] ? toStudent(rows[0]) : null;
   },
 
-  async addPayment(id, amount) {
+  async addPayment(id, amount, method = "cash") {
     await ready;
     const client = await pool.connect();
     try {
@@ -269,7 +269,7 @@ export const db = {
       }
       const s = toStudent(rows[0]);
       const newPaid = Math.min(s.total, s.paid + amount);
-      const newPayments = [...(s.payments || []), { amount, date: new Date().toISOString() }];
+      const newPayments = [...(s.payments || []), { amount, date: new Date().toISOString(), method }];
       const { rows: updated } = await client.query(
         "UPDATE students SET paid = $1, payments = $2 WHERE id = $3 RETURNING *",
         [newPaid, JSON.stringify(newPayments), id]
