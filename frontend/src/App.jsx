@@ -365,6 +365,7 @@ function FeeLedger({ user, onLogout }) {
   const [schoolFilter, setSchoolFilter] = useState(allowedSchools.length === 1 ? allowedSchools[0] : "All Schools");
   const [statusFilter, setStatusFilter] = useState("all");
   const [classFilter, setClassFilter] = useState("All Classes");
+  const [planFilter, setPlanFilter] = useState("all");
   const [sortBy, setSortBy] = useState("name");
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(new Set());
@@ -378,6 +379,7 @@ function FeeLedger({ user, onLogout }) {
   const [payModal, setPayModal] = useState(null);
   const [historyStudent, setHistoryStudent] = useState(null);
   const [scheduleStudentId, setScheduleStudentId] = useState(null);
+  const [scheduleMethodByPeriod, setScheduleMethodByPeriod] = useState({});
   const [editingId, setEditingId] = useState(null);
   const [savingStudent, setSavingStudent] = useState(false);
   const [newStudent, setNewStudent] = useState({ name: "", cls: "", school: allowedSchools[0], phone: "", total: "", paid: "", due: "", planSelect: "full", installmentAmount: "" });
@@ -444,18 +446,20 @@ function FeeLedger({ user, onLogout }) {
       .map((s) => ({ ...s, status: statusOf(s), balance: s.total - s.paid, daysOverdue: -daysBetween(s.due, todayISO()) }))
       .filter((s) => (schoolFilter === "All Schools" ? true : s.school === schoolFilter))
       .filter((s) => (classFilter === "All Classes" ? true : s.cls === classFilter))
+      .filter((s) => (planFilter === "all" ? true : planSelectValue(s.planType, s.frequency) === planFilter))
       .filter((s) => (statusFilter === "all" ? true : s.status === statusFilter))
       .filter((s) => s.name.toLowerCase().includes(query.toLowerCase()));
     if (sortBy === "name") list.sort((a, b) => a.name.localeCompare(b.name));
     if (sortBy === "balance") list.sort((a, b) => b.balance - a.balance);
     if (sortBy === "overdue") list.sort((a, b) => b.daysOverdue - a.daysOverdue);
     return list;
-  }, [students, schoolFilter, classFilter, statusFilter, query, sortBy]);
+  }, [students, schoolFilter, classFilter, planFilter, statusFilter, query, sortBy]);
 
   const stats = useMemo(() => {
     const pool = students.map((s) => withComputed(s)).map((s) => ({ ...s, status: statusOf(s) }))
       .filter((s) => (schoolFilter === "All Schools" ? true : s.school === schoolFilter))
-      .filter((s) => (classFilter === "All Classes" ? true : s.cls === classFilter));
+      .filter((s) => (classFilter === "All Classes" ? true : s.cls === classFilter))
+      .filter((s) => (planFilter === "all" ? true : planSelectValue(s.planType, s.frequency) === planFilter));
     return {
       count: pool.length,
       totalDue: pool.reduce((a, s) => a + (s.total - s.paid), 0),
@@ -463,7 +467,7 @@ function FeeLedger({ user, onLogout }) {
       totalFees: pool.reduce((a, s) => a + s.total, 0),
       overdue: pool.filter((s) => s.status === "overdue").length,
     };
-  }, [students, schoolFilter, classFilter]);
+  }, [students, schoolFilter, classFilter, planFilter]);
 
   const scheduleStudent = scheduleStudentId ? withComputed(students.find((s) => s.id === scheduleStudentId) || null) : null;
   useEffect(() => {
@@ -485,10 +489,11 @@ function FeeLedger({ user, onLogout }) {
     return students.reduce((total, raw) => {
       if (schoolFilter !== "All Schools" && raw.school !== schoolFilter) return total;
       if (classFilter !== "All Classes" && raw.cls !== classFilter) return total;
+      if (planFilter !== "all" && planSelectValue(raw.planType, raw.frequency) !== planFilter) return total;
       const sum = (raw.payments || []).filter((p) => monthKey(p.date) === key).reduce((a, p) => a + Number(p.amount || 0), 0);
       return total + sum;
     }, 0);
-  }, [students, schoolFilter, classFilter]);
+  }, [students, schoolFilter, classFilter, planFilter]);
 
   const availableExpenseCategories = useMemo(() => {
     const pool = schoolFilter === "All Schools" ? expenses : expenses.filter((e) => e.school === schoolFilter);
@@ -598,7 +603,7 @@ function FeeLedger({ user, onLogout }) {
     }
   }
 
-  async function markInstallmentPaid(studentId, period) {
+  async function markInstallmentPaid(studentId, period, method) {
     const s = students.find((x) => x.id === studentId);
     if (!s) return;
     const inst = (s.installments || []).find((i) => i.period === period);
@@ -607,7 +612,7 @@ function FeeLedger({ user, onLogout }) {
       // Server marks this one installment paid atomically (row-locked) — we don't
       // send the array back ourselves, so a second person acting on the same
       // student at nearly the same time can't clobber this change. See db.js.
-      const updated = await api.markInstallmentPaid(studentId, period);
+      const updated = await api.markInstallmentPaid(studentId, period, method);
       setStudents((prev) => prev.map((x) => (x.id === studentId ? updated : x)));
       setToast({ kind: "ok", text: `${inst.period} marked paid.` });
     } catch (err) {
@@ -1276,6 +1281,10 @@ function FeeLedger({ user, onLogout }) {
                   {availableClasses.map((c) => <option key={c} value={c}>{c === "All Classes" ? "All classes" : c}</option>)}
                 </select>
               )}
+              <select className="pill-select" value={planFilter} onChange={(e) => setPlanFilter(e.target.value)}>
+                <option value="all">All plans</option>
+                {PLAN_SELECT_OPTIONS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
+              </select>
               <select className="pill-select" value={sortBy} onChange={(e) => setSortBy(e.target.value)}>
                 <option value="name">Sort: Name</option>
                 <option value="overdue">Sort: Most overdue</option>
@@ -1623,9 +1632,35 @@ function FeeLedger({ user, onLogout }) {
                       <Check size={11} strokeWidth={2.5} /> Paid
                     </span>
                   ) : (
-                    <button className="btn btn-primary" onClick={() => markInstallmentPaid(scheduleStudent.id, inst.period)}>
-                      <Check size={14} /> Mark paid
-                    </button>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <div style={{ display: "flex", border: "1px solid var(--border)", borderRadius: 6, overflow: "hidden" }}>
+                        <button
+                          type="button"
+                          className="btn btn-ghost"
+                          style={{
+                            padding: "4px 8px", fontSize: 11.5, borderRadius: 0,
+                            background: (scheduleMethodByPeriod[inst.period] || "cash") === "cash" ? "var(--highlight)" : "transparent",
+                          }}
+                          onClick={() => setScheduleMethodByPeriod((prev) => ({ ...prev, [inst.period]: "cash" }))}
+                        >
+                          Cash
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-ghost"
+                          style={{
+                            padding: "4px 8px", fontSize: 11.5, borderRadius: 0,
+                            background: scheduleMethodByPeriod[inst.period] === "upi_bank" ? "var(--highlight)" : "transparent",
+                          }}
+                          onClick={() => setScheduleMethodByPeriod((prev) => ({ ...prev, [inst.period]: "upi_bank" }))}
+                        >
+                          UPI / Bank
+                        </button>
+                      </div>
+                      <button className="btn btn-primary" onClick={() => markInstallmentPaid(scheduleStudent.id, inst.period, scheduleMethodByPeriod[inst.period] || "cash")}>
+                        <Check size={14} /> Mark paid
+                      </button>
+                    </div>
                   )}
                 </div>
               ))}
