@@ -225,7 +225,8 @@ app.post("/api/students/:id/payments", requireAuth, h(async (req, res) => {
   if (!assertSchoolAllowed(req, res, existing.school)) return;
   const amount = Number(req.body.amount);
   if (!amount || amount <= 0) return res.status(400).json({ error: "amount must be a positive number" });
-  const updated = await db.addPayment(req.params.id, amount);
+  const method = req.body.method === "upi_bank" ? "upi_bank" : "cash";
+  const updated = await db.addPayment(req.params.id, amount, method);
   if (!updated) return res.status(404).json({ error: "Student not found" });
   res.json(updated);
 }));
