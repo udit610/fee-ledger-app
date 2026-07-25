@@ -6,7 +6,7 @@ import { api } from "./api.js";
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID;
 const SCHOOLS = ["Vardhman Convent School", "Blossom Heights Pre-School"];
 const EXPENSE_CATEGORIES = ["Salaries", "Rent", "Utilities", "Maintenance", "Supplies", "Transport", "Food & Catering", "Marketing", "Miscellaneous"];
-const TEMPLATE_HEADERS = ["Name", "Class", "School", "Parent Phone", "Total Fee", "Paid", "Due Date", "Quarterly/Biannual Amount", "Monthly Amount"];
+const TEMPLATE_HEADERS = ["Name", "Class", "School", "Parent Phone", "Father's Name", "Total Fee", "Paid", "Due Date", "Quarterly/Biannual Amount", "Monthly Amount"];
 
 // Installment plan configs, keyed by frequency
 const FREQ_CONFIG = {
@@ -14,6 +14,12 @@ const FREQ_CONFIG = {
   quarterly: { count: 4, monthsApart: 3, label: "Quarter" },
   biannual: { count: 2, monthsApart: 6, label: "Half" },
 };
+
+// The school's academic year runs April to March, not the calendar year. Quarterly
+// and biannual installments must land on the fixed academic terms (Q1 April, Q2
+// July, Q3 October, Q4 January) rather than just drifting 3/6 months from whatever
+// date happened to be typed into "Due" when the plan was set up.
+const ACADEMIC_MONTHS = { quarterly: [4, 7, 10, 1], biannual: [4, 10] };
 
 function isInstallmentPlan(s) {
   return s.planType === "monthly" || s.planType === "quarterly";
@@ -61,6 +67,23 @@ function addMonths(dateStr, n) {
   return d.toISOString().slice(0, 10);
 }
 
+// Snaps a due date onto the school's fixed academic-year calendar (April–March),
+// keeping the day-of-month the plan was set up with. `monthNum` is 1-12 (e.g. 4 =
+// April). Given any startDue, figures out which academic year it falls in (April
+// of year Y through March of year Y+1), then returns that year's occurrence of
+// monthNum — April/July/October land in year Y, January lands in year Y+1.
+function academicYearAnchorDue(startDue, monthNum) {
+  const d = new Date(startDue + "T00:00:00");
+  const day = d.getDate();
+  const startMonth = d.getMonth() + 1;
+  const academicYearStart = startMonth >= 4 ? d.getFullYear() : d.getFullYear() - 1;
+  const targetYear = monthNum < 4 ? academicYearStart + 1 : academicYearStart;
+  const daysInTargetMonth = new Date(targetYear, monthNum, 0).getDate();
+  const mm = String(monthNum).padStart(2, "0");
+  const dd = String(Math.min(day, daysInTargetMonth)).padStart(2, "0");
+  return `${targetYear}-${mm}-${dd}`;
+}
+
 // "2026-06-18" -> "June 2026". Used to label installments by actual calendar
 // month/year (derived from each installment's due date) instead of a generic
 // "Month 1" / "Month 2" counter.
@@ -70,11 +93,14 @@ function monthYearLabel(dateStr) {
 }
 
 // Pure function: builds an installment schedule. frequency drives count/spacing.
+// Quarterly/biannual snap onto fixed academic-year terms; monthly stays purely
+// sequential from startDue (there's no fixed-term concept for a monthly cadence).
 function generateInstallments(planType, frequency, startDue, amount) {
   const cfg = FREQ_CONFIG[frequency] || FREQ_CONFIG.monthly;
+  const academicMonths = ACADEMIC_MONTHS[frequency];
   const amt = Number(amount) || 0;
   return Array.from({ length: cfg.count }, (_, i) => {
-    const due = addMonths(startDue, i * cfg.monthsApart);
+    const due = academicMonths ? academicYearAnchorDue(startDue, academicMonths[i]) : addMonths(startDue, i * cfg.monthsApart);
     // Monthly installments are just labeled by their calendar month ("June 2026").
     // Quarterly/biannual keep their period number too, since one calendar month
     // alone doesn't convey "this is installment 2 of 4".
@@ -138,11 +164,16 @@ function normName(s) {
   return String(s || "").trim().toLowerCase().replace(/\s+/g, " ");
 }
 
-// Flags an import row as a likely duplicate of an existing student (same name+class+school).
+// Flags an import row as a likely duplicate of an existing student (same name+class+school
+// AND, when both records have one on file, the same father's name too — this is what keeps
+// two genuinely different kids with an identical name/class/school, e.g. twins, from being
+// merged into one record during import).
 function findDuplicate(row, existingStudents) {
-  return existingStudents.find(
-    (s) => normName(s.name) === normName(row.name) && normName(s.cls) === normName(row.cls) && s.school === row.school
-  );
+  return existingStudents.find((s) => {
+    if (normName(s.name) !== normName(row.name) || normName(s.cls) !== normName(row.cls) || s.school !== row.school) return false;
+    if (s.fatherName && row.fatherName) return normName(s.fatherName) === normName(row.fatherName);
+    return true; // no father's name on file for one or both — fall back to name+class+school only
+  });
 }
 
 // A student "needs a reminder" if they have a balance due within the next 3 days (or overdue)
@@ -211,7 +242,7 @@ function exportLedger(students) {
   const rows = students.map((raw) => {
     const s = withComputed(raw);
     return {
-      Name: s.name, Class: s.cls, School: s.school, "Parent Phone": s.phone,
+      Name: s.name, Class: s.cls, School: s.school, "Parent Phone": s.phone, "Father's Name": s.fatherName || "",
       Plan: planLabel(s),
       "Total Fee": s.total, Paid: s.paid, Balance: s.total - s.paid, "Due Date": s.due, Status: statusOf(s),
     };
@@ -261,6 +292,7 @@ function parseWorkbook(arrayBuffer) {
     const cls = String(map["class"] || map["grade"] || "").trim();
     const school = String(map["school"] || "").trim();
     const phone = String(map["parentphone"] || map["phone"] || map["whatsapp"] || "").trim();
+    const fatherName = String(map["fathersname"] || map["fathername"] || map["guardianname"] || "").trim();
     const paid = Number(map["paid"] || 0);
     const due = excelDateToISO(map["duedate"] || map["due"]);
     const monthlyAmount = Number(map["monthlyamount"] || 0);
@@ -286,7 +318,7 @@ function parseWorkbook(arrayBuffer) {
     if (!total || total <= 0) errors.push("Missing/invalid total fee (or installment amount)");
     if (!due) errors.push("Missing/invalid due date");
     return {
-      rowNum: i + 2, id: "tmp" + i, name, cls: cls || "—", school: school || SCHOOLS[0], phone,
+      rowNum: i + 2, id: "tmp" + i, name, cls: cls || "—", school: school || SCHOOLS[0], phone, fatherName,
       total, paid: paid || 0, due, planType, frequency, installmentAmount, errors,
     };
   });
@@ -423,7 +455,7 @@ function FeeLedger({ user, onLogout }) {
   const [scheduleMethodByPeriod, setScheduleMethodByPeriod] = useState({});
   const [editingId, setEditingId] = useState(null);
   const [savingStudent, setSavingStudent] = useState(false);
-  const [newStudent, setNewStudent] = useState({ name: "", cls: "", school: allowedSchools[0], phone: "", total: "", paid: "", due: "", planSelect: "full", installmentAmount: "" });
+  const [newStudent, setNewStudent] = useState({ name: "", cls: "", school: allowedSchools[0], phone: "", fatherName: "", total: "", paid: "", due: "", planSelect: "full", installmentAmount: "" });
   const [showImport, setShowImport] = useState(false);
   const [importRows, setImportRows] = useState(null);
   const [importFileName, setImportFileName] = useState("");
@@ -494,6 +526,14 @@ function FeeLedger({ user, onLogout }) {
   useEffect(() => {
     if (!availableClasses.includes(classFilter)) setClassFilter("All Classes");
   }, [availableClasses, classFilter]);
+
+  // Names shared by more than one student — used to only show "Father: ..." on rows
+  // where it's actually needed to tell two same-named kids apart, instead of on every row.
+  const duplicateNames = useMemo(() => {
+    const counts = {};
+    students.forEach((s) => { counts[normName(s.name)] = (counts[normName(s.name)] || 0) + 1; });
+    return new Set(Object.keys(counts).filter((n) => counts[n] > 1));
+  }, [students]);
 
   const filtered = useMemo(() => {
     let list = students
@@ -706,7 +746,7 @@ function FeeLedger({ user, onLogout }) {
       return setToast({ kind: "warn", text: "Installment amount is required for this plan." });
     }
 
-    const base = { name: newStudent.name, cls: newStudent.cls, school: newStudent.school, phone: newStudent.phone };
+    const base = { name: newStudent.name, cls: newStudent.cls, school: newStudent.school, phone: newStudent.phone, fatherName: newStudent.fatherName };
     let payload;
     if (!isInstallment) {
       payload = { ...base, planType: "full", frequency: null, total: newStudent.total, paid: newStudent.paid, due: newStudent.due };
@@ -770,7 +810,7 @@ function FeeLedger({ user, onLogout }) {
       }
       setShowAdd(false);
       setEditingId(null);
-      setNewStudent({ name: "", cls: "", school: allowedSchools[0], phone: "", total: "", paid: "", due: "", planSelect: "full", installmentAmount: "" });
+      setNewStudent({ name: "", cls: "", school: allowedSchools[0], phone: "", fatherName: "", total: "", paid: "", due: "", planSelect: "full", installmentAmount: "" });
     } catch (err) {
       setToast({ kind: "warn", text: err.message });
     } finally {
@@ -786,7 +826,7 @@ function FeeLedger({ user, onLogout }) {
     // due date" field means the latter, so pull it straight from the schedule.
     const firstDue = isInstallmentPlan(s) && s.installments && s.installments[0] ? s.installments[0].due : s.due;
     setNewStudent({
-      name: s.name, cls: s.cls, school: s.school, phone: s.phone,
+      name: s.name, cls: s.cls, school: s.school, phone: s.phone, fatherName: s.fatherName || "",
       total: String(s.total), paid: String(s.paid), due: firstDue,
       planSelect: planSelectValue(s.planType, s.frequency),
       installmentAmount: s.installmentAmount ? String(s.installmentAmount) : "",
@@ -1206,7 +1246,8 @@ function FeeLedger({ user, onLogout }) {
           .icon-btn { width: 34px; height: 34px; }
           .checkbox { width: 19px; height: 19px; }
           .row { grid-template-columns: 18px 32px 1fr; row-gap: 10px; padding: 12px; }
-          .row-right { grid-column: 1 / -1; justify-content: space-between; padding-left: 44px; }
+          .row-right { grid-column: 1 / -1; justify-content: space-between; padding-left: 44px; flex-wrap: wrap; row-gap: 8px; }
+          .row-actions { flex-wrap: wrap; justify-content: flex-end; }
           .amt-sub { display: none; }
           .toolbar-card .btn span, .toolbar-card .btn { font-size: 12.5px; padding: 8px 10px; }
           .header { padding: 18px 16px 16px; }
@@ -1406,6 +1447,7 @@ function FeeLedger({ user, onLogout }) {
                       <div className="row-sub">
                         {s.cls} · {s.school} · Due {s.due}
                         {s.status === "overdue" && <span style={{ color: "var(--over)", fontWeight: 600 }}> · {s.daysOverdue}d overdue</span>}
+                        {duplicateNames.has(normName(s.name)) && s.fatherName && <span> · Father: {s.fatherName}</span>}
                       </div>
                       {installment && (
                         <span className="plan-chip">{planLabel(s)} · {paidCount}/{totalCount} paid</span>
@@ -1419,7 +1461,7 @@ function FeeLedger({ user, onLogout }) {
                       </div>
                       <StampBadge status={s.status} />
                       <div className="row-actions">
-                        {!isCollector && balance > 0 && s.phone && (
+                        {balance > 0 && s.phone && (
                           <a className="icon-btn" title="Send WhatsApp now" href={waLink(s.phone, defaultTemplate(s))} target="_blank" rel="noreferrer" onClick={() => logSingleReminder(s)}>
                             <MessageCircle size={14} />
                           </a>
@@ -1533,6 +1575,7 @@ function FeeLedger({ user, onLogout }) {
               <div className="field"><label>School</label><select value={newStudent.school} onChange={(e) => setNewStudent({ ...newStudent, school: e.target.value })}>{allowedSchools.map((s) => <option key={s}>{s}</option>)}</select></div>
             </div>
             <div className="field"><label>Parent WhatsApp number</label><input value={newStudent.phone} onChange={(e) => setNewStudent({ ...newStudent, phone: e.target.value })} placeholder="98XXXXXXXX" /></div>
+            <div className="field"><label>Father's name</label><input value={newStudent.fatherName} onChange={(e) => setNewStudent({ ...newStudent, fatherName: e.target.value })} placeholder="Helps tell apart two students with the same name" /></div>
             <div className="field">
               <label>Payment plan</label>
               <select value={newStudent.planSelect} onChange={(e) => setNewStudent({ ...newStudent, planSelect: e.target.value })}>
@@ -1620,7 +1663,7 @@ function FeeLedger({ user, onLogout }) {
             <div className="modal-head"><div className="modal-title">Import from Excel</div><button className="icon-btn" onClick={() => { setShowImport(false); setImportRows(null); }}><X size={16} /></button></div>
             {!importRows && (
               <>
-                <p style={{ fontSize: 13, color: "var(--text-soft)", marginBottom: 12 }}>Columns: <strong>Name, Class, School, Parent Phone, Total Fee, Paid, Due Date</strong></p>
+                <p style={{ fontSize: 13, color: "var(--text-soft)", marginBottom: 12 }}>Columns: <strong>Name, Class, School, Parent Phone, Father's Name, Total Fee, Paid, Due Date</strong></p>
                 <button className="btn btn-ghost" style={{ width: "100%", justifyContent: "center", marginBottom: 10 }} onClick={downloadTemplate}><Download size={15} /> Download template</button>
                 <label className="btn btn-primary" style={{ width: "100%", justifyContent: "center", cursor: "pointer" }}>
                   <Upload size={15} /> Choose file
