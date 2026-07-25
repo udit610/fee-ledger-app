@@ -300,6 +300,18 @@ app.post("/api/students/:id/transport/payments", requireAuth, h(async (req, res)
   res.json(updated);
 }));
 
+// Full reset of a student's transport ledger — admin-only, same destructive-reset
+// pattern as the tuition "Regenerate schedule" route below.
+app.post("/api/students/:id/transport/reset", requireAuth, requireAdmin, h(async (req, res) => {
+  const all = await db.getStudents();
+  const existing = all.find((s) => s.id === req.params.id);
+  if (!existing) return res.status(404).json({ error: "Student not found" });
+  if (!assertSchoolAllowed(req, res, existing.school)) return;
+  const updated = await db.resetTransport(req.params.id);
+  if (!updated) return res.status(404).json({ error: "Student not found" });
+  res.json(updated);
+}));
+
 // Atomic — marks exactly one installment paid without the client ever sending back
 // the whole installments array, so two people acting on the same student at once
 // can't silently overwrite each other's change (see db.js for the locking detail).
