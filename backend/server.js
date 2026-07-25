@@ -258,7 +258,7 @@ app.post("/api/students/:id/payments", requireAuth, h(async (req, res) => {
   const amount = Number(req.body.amount);
   if (!amount || amount <= 0) return res.status(400).json({ error: "amount must be a positive number" });
   const method = req.body.method === "upi_bank" ? "upi_bank" : "cash";
-  const updated = await db.addPayment(req.params.id, amount, method);
+  const updated = await db.addPayment(req.params.id, amount, method, req.user.name || req.user.email);
   if (!updated) return res.status(404).json({ error: "Student not found" });
   res.json(updated);
 }));
@@ -279,8 +279,11 @@ app.post("/api/students/:id/transport/months", requireAuth, h(async (req, res) =
   if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: "month must be in YYYY-MM format" });
   if (month.slice(5, 7) === "06") return res.status(400).json({ error: "No transport charge in June (summer vacation)" });
   const enabled = !!req.body.enabled;
-  const updated = await db.toggleTransportMonth(req.params.id, month, enabled);
+  const updated = await db.toggleTransportMonth(req.params.id, month, enabled, req.user.role === "collector");
   if (!updated) return res.status(404).json({ error: "Student not found" });
+  if (updated.error === "collector_cannot_remove") {
+    return res.status(403).json({ error: "Only an admin can remove a transport month once it's been added." });
+  }
   res.json(updated);
 }));
 
@@ -292,7 +295,7 @@ app.post("/api/students/:id/transport/payments", requireAuth, h(async (req, res)
   const amount = Number(req.body.amount);
   if (!amount || amount <= 0) return res.status(400).json({ error: "amount must be a positive number" });
   const method = req.body.method === "upi_bank" ? "upi_bank" : "cash";
-  const updated = await db.addTransportPayment(req.params.id, amount, method);
+  const updated = await db.addTransportPayment(req.params.id, amount, method, req.user.name || req.user.email);
   if (!updated) return res.status(404).json({ error: "Student not found" });
   res.json(updated);
 }));
@@ -306,7 +309,7 @@ app.post("/api/students/:id/installments/:period/pay", requireAuth, h(async (req
   if (!existing) return res.status(404).json({ error: "Student not found" });
   if (!assertSchoolAllowed(req, res, existing.school)) return;
   const method = req.body.method === "upi_bank" ? "upi_bank" : "cash";
-  const result = await db.markInstallmentPaid(req.params.id, req.params.period, method);
+  const result = await db.markInstallmentPaid(req.params.id, req.params.period, method, req.user.name || req.user.email);
   if (result.error === "not_found") return res.status(404).json({ error: "Student not found" });
   if (result.error === "period_not_found") return res.status(404).json({ error: "That installment doesn't exist on this student" });
   res.json(result.student);
