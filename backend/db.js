@@ -401,6 +401,18 @@ export const db = {
     }
   },
 
+  // Full reset of a student's transport ledger — clears every opted-in month, the
+  // paid total, and the payment log. Admin-only (enforced in server.js), same
+  // destructive-reset pattern as the tuition "Regenerate schedule" button.
+  async resetTransport(id) {
+    await ready;
+    const { rows } = await pool.query(
+      "UPDATE students SET transport_months = '[]', transport_paid = 0, transport_payments = '[]' WHERE id = $1 RETURNING *",
+      [id]
+    );
+    return rows[0] ? toStudent(rows[0]) : null;
+  },
+
   // Marks exactly one installment paid on the server, inside a locked transaction.
   // This is the fix for the "two people editing at once" lost-update risk: the
   // frontend no longer computes and sends back the WHOLE installments array (which
