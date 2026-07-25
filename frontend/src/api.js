@@ -30,6 +30,8 @@ export const api = {
   recordPayment: (id, amount, method) => request(`/api/students/${id}/payments`, { method: "POST", body: JSON.stringify({ amount, method }) }),
   markInstallmentPaid: (id, period, method) => request(`/api/students/${id}/installments/${encodeURIComponent(period)}/pay`, { method: "POST", body: JSON.stringify({ method }) }),
   regenerateSchedule: (id) => request(`/api/students/${id}/regenerate-schedule`, { method: "POST" }),
+  toggleTransportMonth: (id, month) => request(`/api/students/${id}/transport/${month}/toggle`, { method: "POST" }),
+  markTransportMonthPaid: (id, month, method) => request(`/api/students/${id}/transport/${month}/pay`, { method: "POST", body: JSON.stringify({ method }) }),
   deleteStudent: (id) => request(`/api/students/${id}`, { method: "DELETE" }),
   bulkImport: (students) => request("/api/students/bulk-import", { method: "POST", body: JSON.stringify({ students }) }),
 
