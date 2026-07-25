@@ -36,6 +36,7 @@ async function init() {
       cls TEXT,
       school TEXT NOT NULL,
       phone TEXT DEFAULT '',
+      father_name TEXT DEFAULT '',
       total NUMERIC NOT NULL DEFAULT 0,
       paid NUMERIC NOT NULL DEFAULT 0,
       due TEXT,
@@ -48,6 +49,10 @@ async function init() {
       created_at TIMESTAMPTZ DEFAULT now()
     );
   `);
+  // Existing databases created before this column existed won't get it from
+  // CREATE TABLE IF NOT EXISTS above (that only runs against a table that
+  // doesn't exist yet) — add it explicitly, idempotently, for those.
+  await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS father_name TEXT DEFAULT '';`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS reminders (
       id TEXT PRIMARY KEY,
@@ -116,6 +121,7 @@ function toStudent(row) {
     cls: row.cls,
     school: row.school,
     phone: row.phone || "",
+    fatherName: row.father_name || "",
     total: Number(row.total),
     paid: Number(row.paid),
     due: row.due,
@@ -164,6 +170,21 @@ const FREQ_CONFIG = {
   biannual: { count: 2, monthsApart: 6, label: "Half" },
 };
 
+// The school's academic year runs April to March — see matching comment in App.jsx.
+const ACADEMIC_MONTHS = { quarterly: [4, 7, 10, 1], biannual: [4, 10] };
+
+function academicYearAnchorDue(startDue, monthNum) {
+  const d = new Date(startDue + "T00:00:00");
+  const day = d.getDate();
+  const startMonth = d.getMonth() + 1;
+  const academicYearStart = startMonth >= 4 ? d.getFullYear() : d.getFullYear() - 1;
+  const targetYear = monthNum < 4 ? academicYearStart + 1 : academicYearStart;
+  const daysInTargetMonth = new Date(targetYear, monthNum, 0).getDate();
+  const mm = String(monthNum).padStart(2, "0");
+  const dd = String(Math.min(day, daysInTargetMonth)).padStart(2, "0");
+  return `${targetYear}-${mm}-${dd}`;
+}
+
 function addMonths(dateStr, n) {
   const d = new Date(dateStr + "T00:00:00");
   const day = d.getDate();
@@ -180,9 +201,10 @@ function monthYearLabel(dateStr) {
 
 function generateInstallments(frequency, startDue, amount) {
   const cfg = FREQ_CONFIG[frequency] || FREQ_CONFIG.monthly;
+  const academicMonths = ACADEMIC_MONTHS[frequency];
   const amt = Number(amount) || 0;
   return Array.from({ length: cfg.count }, (_, i) => {
-    const due = addMonths(startDue, i * cfg.monthsApart);
+    const due = academicMonths ? academicYearAnchorDue(startDue, academicMonths[i]) : addMonths(startDue, i * cfg.monthsApart);
     const period = cfg === FREQ_CONFIG.monthly ? monthYearLabel(due) : `${cfg.label} ${i + 1} · ${monthYearLabel(due)}`;
     return { period, due, amount: amt, paid: false, paidDate: null };
   });
@@ -198,11 +220,11 @@ export const db = {
   async addStudent(student) {
     await ready;
     const { rows } = await pool.query(
-      `INSERT INTO students (id, name, cls, school, phone, total, paid, due, plan_type, frequency, installment_amount, installments, payments, history)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+      `INSERT INTO students (id, name, cls, school, phone, father_name, total, paid, due, plan_type, frequency, installment_amount, installments, payments, history)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
        RETURNING *`,
       [
-        student.id, student.name, student.cls, student.school, student.phone || "",
+        student.id, student.name, student.cls, student.school, student.phone || "", student.fatherName || "",
         student.total, student.paid || 0, student.due,
         student.planType || "full", student.frequency || null,
         student.installmentAmount ?? null,
@@ -229,7 +251,7 @@ export const db = {
   async updateStudent(id, patch) {
     await ready;
     const fieldMap = {
-      name: "name", cls: "cls", school: "school", phone: "phone",
+      name: "name", cls: "cls", school: "school", phone: "phone", fatherName: "father_name",
       total: "total", paid: "paid", due: "due",
       planType: "plan_type", frequency: "frequency", installmentAmount: "installment_amount",
       installments: "installments", payments: "payments", history: "history",
@@ -499,10 +521,10 @@ export const db = {
       await client.query("DELETE FROM expenses");
       for (const s of students) {
         await client.query(
-          `INSERT INTO students (id, name, cls, school, phone, total, paid, due, plan_type, frequency, installment_amount, installments, payments, history)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+          `INSERT INTO students (id, name, cls, school, phone, father_name, total, paid, due, plan_type, frequency, installment_amount, installments, payments, history)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
           [
-            s.id, s.name, s.cls, s.school, s.phone || "", s.total, s.paid || 0, s.due,
+            s.id, s.name, s.cls, s.school, s.phone || "", s.fatherName || "", s.total, s.paid || 0, s.due,
             s.planType || "full", s.frequency || null, s.installmentAmount ?? null,
             JSON.stringify(s.installments || []), JSON.stringify(s.payments || []), JSON.stringify(s.history || []),
           ]
