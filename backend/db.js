@@ -300,7 +300,7 @@ export const db = {
     return rows[0] ? toStudent(rows[0]) : null;
   },
 
-  async addPayment(id, amount, method = "cash") {
+  async addPayment(id, amount, method = "cash", by = "") {
     await ready;
     const client = await pool.connect();
     try {
@@ -315,7 +315,7 @@ export const db = {
       }
       const s = toStudent(rows[0]);
       const newPaid = Math.min(s.total, s.paid + amount);
-      const newPayments = [...(s.payments || []), { amount, date: new Date().toISOString(), method }];
+      const newPayments = [...(s.payments || []), { amount, date: new Date().toISOString(), method, by }];
       const { rows: updated } = await client.query(
         "UPDATE students SET paid = $1, payments = $2 WHERE id = $3 RETURNING *",
         [newPaid, JSON.stringify(newPayments), id]
@@ -333,7 +333,11 @@ export const db = {
   // Toggles a single academic-year month ("2026-04") on/off in a student's transport
   // opt-in list. Row-locked like addPayment — if the same student's transport is being
   // toggled by two people at once, the second one waits instead of clobbering the first.
-  async toggleTransportMonth(id, monthKey, enabled) {
+  // isCollector: when true, this call can only ADD a month, never remove one that's
+  // already opted in — enforced here (not just in the UI) so a collector account can't
+  // just call the API directly to bypass it. The route in server.js passes this based
+  // on req.user.role.
+  async toggleTransportMonth(id, monthKey, enabled, isCollector = false) {
     await ready;
     const client = await pool.connect();
     try {
@@ -345,6 +349,10 @@ export const db = {
       }
       const s = toStudent(rows[0]);
       const current = new Set(s.transportMonths || []);
+      if (isCollector && !enabled && current.has(monthKey)) {
+        await safeRollback(client);
+        return { error: "collector_cannot_remove" };
+      }
       if (enabled) current.add(monthKey);
       else current.delete(monthKey);
       const newMonths = Array.from(current).sort();
@@ -365,7 +373,7 @@ export const db = {
   // Records a transport payment. Same shape/logic as addPayment, but against the
   // separate transport_paid/transport_payments columns — transport is tracked as its
   // own balance, entirely independent of the student's tuition total/paid.
-  async addTransportPayment(id, amount, method = "cash") {
+  async addTransportPayment(id, amount, method = "cash", by = "") {
     await ready;
     const client = await pool.connect();
     try {
@@ -378,7 +386,7 @@ export const db = {
       const s = toStudent(rows[0]);
       const transportTotal = (s.transportMonths || []).length * (s.transportRate || 0);
       const newPaid = Math.min(transportTotal, (s.transportPaid || 0) + amount);
-      const newPayments = [...(s.transportPayments || []), { amount, date: new Date().toISOString(), method }];
+      const newPayments = [...(s.transportPayments || []), { amount, date: new Date().toISOString(), method, by }];
       const { rows: updated } = await client.query(
         "UPDATE students SET transport_paid = $1, transport_payments = $2 WHERE id = $3 RETURNING *",
         [newPaid, JSON.stringify(newPayments), id]
@@ -399,7 +407,7 @@ export const db = {
   // could be based on stale data) — it just says "mark this one period paid" and the
   // database does the read-modify-write atomically, so concurrent marks can't clobber
   // each other no matter how close together they happen.
-  async markInstallmentPaid(id, period, method = "cash") {
+  async markInstallmentPaid(id, period, method = "cash", by = "") {
     await ready;
     const client = await pool.connect();
     try {
@@ -420,10 +428,10 @@ export const db = {
         return { student: s, alreadyPaid: true };
       }
       const installments = s.installments.map((i) =>
-        i.period === period ? { ...i, paid: true, paidDate: new Date().toISOString() } : i
+        i.period === period ? { ...i, paid: true, paidDate: new Date().toISOString(), paidBy: by } : i
       );
       const paid = installments.filter((i) => i.paid).reduce((a, i) => a + Number(i.amount || 0), 0);
-      const payments = [...(s.payments || []), { amount: inst.amount, date: new Date().toISOString(), note: inst.period, method }];
+      const payments = [...(s.payments || []), { amount: inst.amount, date: new Date().toISOString(), note: inst.period, method, by }];
       const { rows: updated } = await client.query(
         "UPDATE students SET installments = $1, paid = $2, payments = $3 WHERE id = $4 RETURNING *",
         [JSON.stringify(installments), paid, JSON.stringify(payments), id]
