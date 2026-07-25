@@ -188,9 +188,12 @@ function academicYearAnchorDue(startDue, monthNum) {
 function addMonths(dateStr, n) {
   const d = new Date(dateStr + "T00:00:00");
   const day = d.getDate();
-  d.setMonth(d.getMonth() + n);
-  if (d.getDate() < day) d.setDate(0); // guard against month-length overflow (e.g. Jan 31 + 1mo)
-  return d.toISOString().slice(0, 10);
+  let targetMonth = d.getMonth() + n;
+  let targetYear = d.getFullYear() + Math.floor(targetMonth / 12);
+  targetMonth = ((targetMonth % 12) + 12) % 12;
+  const daysInTargetMonth = new Date(targetYear, targetMonth + 1, 0).getDate();
+  const clampedDay = Math.min(day, daysInTargetMonth); // guard against month-length overflow (e.g. Jan 31 + 1mo)
+  return `${targetYear}-${String(targetMonth + 1).padStart(2, "0")}-${String(clampedDay).padStart(2, "0")}`;
 }
 
 // "2026-06-18" -> "June 2026" — mirrors the frontend's monthYearLabel (App.jsx).
