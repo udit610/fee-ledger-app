@@ -171,7 +171,7 @@ app.get("/api/students", requireAuth, h(async (req, res) => {
 }));
 
 app.post("/api/students", requireAuth, requireAdmin, h(async (req, res) => {
-  const { name, cls, school, phone, fatherName, total, paid, due, planType, frequency, installmentAmount, installments, transportMonthlyAmount } = req.body;
+  const { name, cls, school, phone, fatherName, total, paid, due, planType, frequency, installmentAmount, installments, transportRate } = req.body;
   if (!name || !total || !due) return res.status(400).json({ error: "name, total, and due are required" });
   if (!assertSchoolAllowed(req, res, school)) return;
   const student = {
@@ -190,7 +190,7 @@ app.post("/api/students", requireAuth, requireAdmin, h(async (req, res) => {
     installments: Array.isArray(installments) ? installments : undefined,
     payments: Number(paid) > 0 ? [{ amount: Number(paid), date: new Date().toISOString() }] : [],
     history: [{ field: "created", oldValue: null, newValue: null, by: req.user.email, at: new Date().toISOString() }],
-    transportMonthlyAmount: transportMonthlyAmount != null && Number(transportMonthlyAmount) > 0 ? Number(transportMonthlyAmount) : undefined,
+    transportRate: Number(transportRate) || 0,
   };
   res.status(201).json(await db.addStudent(student));
 }));
@@ -216,7 +216,6 @@ app.post("/api/students/bulk-import", requireAuth, requireAdmin, h(async (req, r
       frequency: r.frequency || null,
       installmentAmount: r.installmentAmount != null ? Number(r.installmentAmount) : undefined,
       installments: Array.isArray(r.installments) ? r.installments : undefined,
-      transportMonthlyAmount: r.transportMonthlyAmount != null && Number(r.transportMonthlyAmount) > 0 ? Number(r.transportMonthlyAmount) : undefined,
       payments: Number(r.paid) > 0 ? [{ amount: Number(r.paid), date: new Date().toISOString() }] : [],
       history: [{ field: "created", oldValue: null, newValue: null, by: req.user.email, at: new Date().toISOString(), note: "Excel import" }],
     }));
@@ -224,7 +223,7 @@ app.post("/api/students/bulk-import", requireAuth, requireAdmin, h(async (req, r
 }));
 
 // Fields worth tracking in the audit trail. Noisy/bulky fields (installments, payments) are excluded.
-const AUDIT_FIELDS = ["name", "cls", "school", "phone", "fatherName", "total", "paid", "due", "planType", "frequency", "installmentAmount", "transportMonthlyAmount"];
+const AUDIT_FIELDS = ["name", "cls", "school", "phone", "fatherName", "total", "paid", "due", "planType", "frequency", "installmentAmount", "transportRate"];
 
 app.put("/api/students/:id", requireAuth, requireAdmin, h(async (req, res) => {
   const all = await db.getStudents();
@@ -264,6 +263,40 @@ app.post("/api/students/:id/payments", requireAuth, h(async (req, res) => {
   res.json(updated);
 }));
 
+// Transport is a separate opt-in monthly charge (see db.js) — no charge for June
+// (summer vacation), enforced here rather than trusting the client. Both routes are
+// intentionally NOT admin-gated: toggling a month on/off and recording a transport
+// payment are day-to-day counter actions, same as recording a fee payment — a
+// collector-role account needs to be able to do both. Only the per-student transport
+// *rate* (set via the regular student-edit endpoint, which IS admin-gated) is
+// restricted.
+app.post("/api/students/:id/transport/months", requireAuth, h(async (req, res) => {
+  const all = await db.getStudents();
+  const existing = all.find((s) => s.id === req.params.id);
+  if (!existing) return res.status(404).json({ error: "Student not found" });
+  if (!assertSchoolAllowed(req, res, existing.school)) return;
+  const month = String(req.body.month || "");
+  if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: "month must be in YYYY-MM format" });
+  if (month.slice(5, 7) === "06") return res.status(400).json({ error: "No transport charge in June (summer vacation)" });
+  const enabled = !!req.body.enabled;
+  const updated = await db.toggleTransportMonth(req.params.id, month, enabled);
+  if (!updated) return res.status(404).json({ error: "Student not found" });
+  res.json(updated);
+}));
+
+app.post("/api/students/:id/transport/payments", requireAuth, h(async (req, res) => {
+  const all = await db.getStudents();
+  const existing = all.find((s) => s.id === req.params.id);
+  if (!existing) return res.status(404).json({ error: "Student not found" });
+  if (!assertSchoolAllowed(req, res, existing.school)) return;
+  const amount = Number(req.body.amount);
+  if (!amount || amount <= 0) return res.status(400).json({ error: "amount must be a positive number" });
+  const method = req.body.method === "upi_bank" ? "upi_bank" : "cash";
+  const updated = await db.addTransportPayment(req.params.id, amount, method);
+  if (!updated) return res.status(404).json({ error: "Student not found" });
+  res.json(updated);
+}));
+
 // Atomic — marks exactly one installment paid without the client ever sending back
 // the whole installments array, so two people acting on the same student at once
 // can't silently overwrite each other's change (see db.js for the locking detail).
@@ -276,35 +309,6 @@ app.post("/api/students/:id/installments/:period/pay", requireAuth, h(async (req
   const result = await db.markInstallmentPaid(req.params.id, req.params.period, method);
   if (result.error === "not_found") return res.status(404).json({ error: "Student not found" });
   if (result.error === "period_not_found") return res.status(404).json({ error: "That installment doesn't exist on this student" });
-  res.json(result.student);
-}));
-
-// ---------- Transport (opt-in per month, separate ledger from tuition) ----------
-
-app.post("/api/students/:id/transport/:month/toggle", requireAuth, requireAdmin, h(async (req, res) => {
-  const all = await db.getStudents();
-  const existing = all.find((s) => s.id === req.params.id);
-  if (!existing) return res.status(404).json({ error: "Student not found" });
-  if (!assertSchoolAllowed(req, res, existing.school)) return;
-  const result = await db.toggleTransportMonth(req.params.id, req.params.month);
-  if (result.error === "not_found") return res.status(404).json({ error: "Student not found" });
-  if (result.error === "invalid_month") return res.status(400).json({ error: "Transport isn't charged in June, and the month must be a valid YYYY-MM value" });
-  if (result.error === "no_amount_set") return res.status(400).json({ error: "Set a monthly transport amount for this student first" });
-  if (result.error === "month_already_paid") return res.status(400).json({ error: "That month is already paid — it can't be removed" });
-  res.json(result.student);
-}));
-
-// Any signed-in user (not just admins) can record a transport payment, same as
-// tuition installments — this is a collection action, not a plan edit.
-app.post("/api/students/:id/transport/:month/pay", requireAuth, h(async (req, res) => {
-  const all = await db.getStudents();
-  const existing = all.find((s) => s.id === req.params.id);
-  if (!existing) return res.status(404).json({ error: "Student not found" });
-  if (!assertSchoolAllowed(req, res, existing.school)) return;
-  const method = req.body.method === "upi_bank" ? "upi_bank" : "cash";
-  const result = await db.markTransportMonthPaid(req.params.id, req.params.month, method);
-  if (result.error === "not_found") return res.status(404).json({ error: "Student not found" });
-  if (result.error === "month_not_found") return res.status(404).json({ error: "That month hasn't been opted into" });
   res.json(result.student);
 }));
 
