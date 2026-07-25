@@ -171,7 +171,11 @@ const FREQ_CONFIG = {
 };
 
 // The school's academic year runs April to March — see matching comment in App.jsx.
-const ACADEMIC_MONTHS = { quarterly: [4, 7, 10, 1], biannual: [4, 10] };
+const ACADEMIC_MONTHS = {
+  quarterly: [4, 7, 10, 1],
+  biannual: [4, 10],
+  monthly: [4, 5, 6, 7, 8, 9, 10, 11, 12, 1, 2, 3],
+};
 
 function academicYearAnchorDue(startDue, monthNum) {
   const d = new Date(startDue + "T00:00:00");
