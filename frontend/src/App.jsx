@@ -481,6 +481,7 @@ function FeeLedger({ user, onLogout }) {
   const [statusFilter, setStatusFilter] = useState("all");
   const [classFilter, setClassFilter] = useState("All Classes");
   const [planFilter, setPlanFilter] = useState("all");
+  const [transportOnly, setTransportOnly] = useState(false);
   const [sortBy, setSortBy] = useState("name");
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(new Set());
@@ -585,13 +586,14 @@ function FeeLedger({ user, onLogout }) {
       .filter((s) => (schoolFilter === "All Schools" ? true : s.school === schoolFilter))
       .filter((s) => (classFilter === "All Classes" ? true : s.cls === classFilter))
       .filter((s) => (planFilter === "all" ? true : planSelectValue(s.planType, s.frequency) === planFilter))
+      .filter((s) => (!transportOnly ? true : s.transportRate > 0))
       .filter((s) => (statusFilter === "all" ? true : s.status === statusFilter))
       .filter((s) => s.name.toLowerCase().includes(query.toLowerCase()));
     if (sortBy === "name") list.sort((a, b) => a.name.localeCompare(b.name));
     if (sortBy === "balance") list.sort((a, b) => b.balance - a.balance);
     if (sortBy === "overdue") list.sort((a, b) => b.daysOverdue - a.daysOverdue);
     return list;
-  }, [students, schoolFilter, classFilter, planFilter, statusFilter, query, sortBy]);
+  }, [students, schoolFilter, classFilter, planFilter, transportOnly, statusFilter, query, sortBy]);
 
   const stats = useMemo(() => {
     const pool = students.map((s) => withComputed(s)).map((s) => ({ ...s, status: statusOf(s) }))
@@ -779,6 +781,17 @@ function FeeLedger({ user, onLogout }) {
       const updated = await api.recordTransportPayment(studentId, amount, method);
       setStudents((prev) => prev.map((x) => (x.id === studentId ? updated : x)));
       setToast({ kind: "ok", text: `Recorded ${money(amount)} transport payment.` });
+    } catch (err) {
+      setToast({ kind: "warn", text: err.message });
+    }
+  }
+
+  async function resetTransport(studentId) {
+    if (!window.confirm("This clears every opted-in month, the paid total, and the payment log for transport on this student. Continue?")) return;
+    try {
+      const updated = await api.resetTransport(studentId);
+      setStudents((prev) => prev.map((x) => (x.id === studentId ? updated : x)));
+      setToast({ kind: "ok", text: "Transport reset." });
     } catch (err) {
       setToast({ kind: "warn", text: err.message });
     }
@@ -1469,6 +1482,16 @@ function FeeLedger({ user, onLogout }) {
                 onChange={setPlanFilter}
                 options={[{ value: "all", label: "All plans" }, ...PLAN_SELECT_OPTIONS.map((p) => ({ value: p.value, label: p.label }))]}
               />
+              {students.some((s) => s.transportRate > 0) && (
+                <button
+                  type="button"
+                  className={transportOnly ? "btn btn-primary" : "btn btn-ghost"}
+                  onClick={() => setTransportOnly((v) => !v)}
+                  title="Show only students opted into transport"
+                >
+                  <Bus size={15} /> Transport
+                </button>
+              )}
               <Dropdown
                 value={sortBy}
                 onChange={setSortBy}
@@ -1966,6 +1989,15 @@ function FeeLedger({ user, onLogout }) {
                     </div>
                   ))}
                 </div>
+              )}
+              {!isCollector && (
+                <button
+                  className="btn btn-ghost"
+                  style={{ width: "100%", justifyContent: "center", marginTop: 16, paddingTop: 12, borderTop: "1px solid var(--border)" }}
+                  onClick={() => resetTransport(transportStudent.id)}
+                >
+                  Regenerate transport
+                </button>
               )}
             </div>
           </div>
