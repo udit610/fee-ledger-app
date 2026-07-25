@@ -151,61 +151,36 @@ function withComputed(student) {
   return { ...student, total, paid, due };
 }
 
-// ---------------- Transport fee (opt-in per month, separate from tuition) ----------------
-// Parents can opt in or out of transport in any month; it's never charged in June
-// (summer vacation). Unlike tuition installments, there's no fixed upfront schedule —
-// months only exist in a student's transportMonths array once someone opts them in,
-// and can be removed again as long as that month hasn't been paid yet.
-
-const TRANSPORT_SKIP_MONTH = 6; // June
-
-// This year's April-through-March academic-year month keys ("YYYY-MM"), skipping June.
-function transportAcademicMonthKeys(today = todayISO()) {
-  const d = new Date(today + "T00:00:00");
-  const startYear = d.getMonth() + 1 >= 4 ? d.getFullYear() : d.getFullYear() - 1;
-  const keys = [];
-  for (let i = 0; i < 12; i++) {
-    const monthNum = ((4 - 1 + i) % 12) + 1;
-    const year = monthNum < 4 ? startYear + 1 : startYear;
-    if (monthNum === TRANSPORT_SKIP_MONTH) continue;
-    keys.push(`${year}-${String(monthNum).padStart(2, "0")}`);
-  }
-  return keys;
-}
-
-// "2026-04" -> { period: "April 2026", due: "2026-04-10" }. Mirrors the server's
-// transportMonthMeta in db.js — due day is a fixed convention (the 10th), since
-// transport has no per-student anchor date the way tuition installments do.
-function transportMonthMeta(monthKeyStr) {
-  const [y, m] = monthKeyStr.split("-").map(Number);
-  const period = new Date(y, m - 1, 1).toLocaleDateString("en-US", { month: "long", year: "numeric" });
-  return { period, due: `${monthKeyStr}-10` };
-}
-
-// Summarizes a student's transport ledger: only opted-in months count.
-function transportStatusOf(student, today = todayISO()) {
-  const months = student.transportMonths || [];
-  const total = months.reduce((a, m) => a + Number(m.amount || 0), 0);
-  const paid = months.filter((m) => m.paid).reduce((a, m) => a + Number(m.amount || 0), 0);
-  const nextUnpaid = months.filter((m) => !m.paid).sort((a, b) => a.due.localeCompare(b.due))[0];
-  let status = "none";
-  if (months.length === 0) status = "none";
-  else if (total - paid <= 0) status = "paid";
-  else status = nextUnpaid && daysBetween(nextUnpaid.due, today) < 0 ? "overdue" : "pending";
-  return {
-    total, paid, balance: total - paid,
-    paidCount: months.filter((m) => m.paid).length,
-    totalCount: months.length,
-    status,
-  };
-}
-
 function monthKey(iso) {
   return String(iso || "").slice(0, 7); // "YYYY-MM"
 }
 function monthLabel(key) {
   const [y, m] = key.split("-").map(Number);
   return new Date(y, m - 1, 1).toLocaleDateString("en-IN", { month: "short", year: "2-digit" });
+}
+
+// The 11 chargeable transport months for the CURRENT academic year (April–March,
+// skipping June — no charge during summer vacation). Recomputed from today's date,
+// so it automatically rolls over to next year's April once the new academic year starts.
+function currentAcademicYearTransportMonths() {
+  const now = new Date();
+  const academicYearStart = now.getMonth() + 1 >= 4 ? now.getFullYear() : now.getFullYear() - 1;
+  const months = [];
+  for (let m = 4; m <= 12; m++) {
+    if (m !== 6) months.push(`${academicYearStart}-${String(m).padStart(2, "0")}`);
+  }
+  for (let m = 1; m <= 3; m++) months.push(`${academicYearStart + 1}-${String(m).padStart(2, "0")}`);
+  return months; // Apr, May, Jul, Aug, Sep, Oct, Nov, Dec, Jan, Feb, Mar
+}
+
+// Transport is a separate, opt-in-per-month balance — entirely independent of the
+// student's tuition total/paid (see backend db.js). Total is dynamic: rate × however
+// many months they're currently opted into, so it grows/shrinks as months are toggled.
+function transportComputed(student) {
+  const months = student.transportMonths || [];
+  const total = months.length * (student.transportRate || 0);
+  const paid = student.transportPaid || 0;
+  return { total, paid, balance: total - paid };
 }
 
 // Builds a "collected per month" series for the last `months` months from every
@@ -307,12 +282,10 @@ function waLink(phone, message) {
 function exportLedger(students) {
   const rows = students.map((raw) => {
     const s = withComputed(raw);
-    const t = transportStatusOf(raw);
     return {
       Name: s.name, Class: s.cls, School: s.school, "Parent Phone": s.phone, "Father's Name": s.fatherName || "",
       Plan: planLabel(s),
       "Total Fee": s.total, Paid: s.paid, Balance: s.total - s.paid, "Due Date": s.due, Status: statusOf(s),
-      "Transport Total": t.total, "Transport Paid": t.paid, "Transport Balance": t.balance,
     };
   });
   const ws = XLSX.utils.json_to_sheet(rows);
@@ -523,10 +496,9 @@ function FeeLedger({ user, onLogout }) {
   const [scheduleStudentId, setScheduleStudentId] = useState(null);
   const [scheduleMethodByPeriod, setScheduleMethodByPeriod] = useState({});
   const [transportStudentId, setTransportStudentId] = useState(null);
-  const [transportMethodByMonth, setTransportMethodByMonth] = useState({});
   const [editingId, setEditingId] = useState(null);
   const [savingStudent, setSavingStudent] = useState(false);
-  const [newStudent, setNewStudent] = useState({ name: "", cls: "", school: allowedSchools[0], phone: "", fatherName: "", total: "", paid: "", due: "", planSelect: "full", installmentAmount: "", transportMonthlyAmount: "" });
+  const [newStudent, setNewStudent] = useState({ name: "", cls: "", school: allowedSchools[0], phone: "", fatherName: "", transportRate: "", total: "", paid: "", due: "", planSelect: "full", installmentAmount: "" });
   const [showImport, setShowImport] = useState(false);
   const [importRows, setImportRows] = useState(null);
   const [importFileName, setImportFileName] = useState("");
@@ -632,6 +604,8 @@ function FeeLedger({ user, onLogout }) {
       collected: pool.reduce((a, s) => a + s.paid, 0),
       totalFees: pool.reduce((a, s) => a + s.total, 0),
       overdue: pool.filter((s) => s.status === "overdue").length,
+      transportDue: pool.reduce((a, s) => a + transportComputed(s).balance, 0),
+      transportCollected: pool.reduce((a, s) => a + transportComputed(s).paid, 0),
     };
   }, [students, schoolFilter, classFilter, planFilter]);
 
@@ -791,20 +765,20 @@ function FeeLedger({ user, onLogout }) {
     }
   }
 
-  async function toggleTransportMonth(studentId, month) {
+  async function toggleTransportMonth(studentId, month, enabled) {
     try {
-      const updated = await api.toggleTransportMonth(studentId, month);
+      const updated = await api.toggleTransportMonth(studentId, month, enabled);
       setStudents((prev) => prev.map((x) => (x.id === studentId ? updated : x)));
     } catch (err) {
       setToast({ kind: "warn", text: err.message });
     }
   }
 
-  async function markTransportMonthPaid(studentId, month, method) {
+  async function recordTransportPayment(studentId, amount, method) {
     try {
-      const updated = await api.markTransportMonthPaid(studentId, month, method);
+      const updated = await api.recordTransportPayment(studentId, amount, method);
       setStudents((prev) => prev.map((x) => (x.id === studentId ? updated : x)));
-      setToast({ kind: "ok", text: `${transportMonthMeta(month).period} transport marked paid.` });
+      setToast({ kind: "ok", text: `Recorded ${money(amount)} transport payment.` });
     } catch (err) {
       setToast({ kind: "warn", text: err.message });
     }
@@ -841,10 +815,7 @@ function FeeLedger({ user, onLogout }) {
       return setToast({ kind: "warn", text: "Installment amount is required for this plan." });
     }
 
-    const base = {
-      name: newStudent.name, cls: newStudent.cls, school: newStudent.school, phone: newStudent.phone, fatherName: newStudent.fatherName,
-      transportMonthlyAmount: newStudent.transportMonthlyAmount ? Number(newStudent.transportMonthlyAmount) : 0,
-    };
+    const base = { name: newStudent.name, cls: newStudent.cls, school: newStudent.school, phone: newStudent.phone, fatherName: newStudent.fatherName, transportRate: Number(newStudent.transportRate) || 0 };
     let payload;
     if (!isInstallment) {
       payload = { ...base, planType: "full", frequency: null, total: newStudent.total, paid: newStudent.paid, due: newStudent.due };
@@ -908,7 +879,7 @@ function FeeLedger({ user, onLogout }) {
       }
       setShowAdd(false);
       setEditingId(null);
-      setNewStudent({ name: "", cls: "", school: allowedSchools[0], phone: "", fatherName: "", total: "", paid: "", due: "", planSelect: "full", installmentAmount: "", transportMonthlyAmount: "" });
+      setNewStudent({ name: "", cls: "", school: allowedSchools[0], phone: "", fatherName: "", transportRate: "", total: "", paid: "", due: "", planSelect: "full", installmentAmount: "" });
     } catch (err) {
       setToast({ kind: "warn", text: err.message });
     } finally {
@@ -925,10 +896,10 @@ function FeeLedger({ user, onLogout }) {
     const firstDue = isInstallmentPlan(s) && s.installments && s.installments[0] ? s.installments[0].due : s.due;
     setNewStudent({
       name: s.name, cls: s.cls, school: s.school, phone: s.phone, fatherName: s.fatherName || "",
+      transportRate: s.transportRate ? String(s.transportRate) : "",
       total: String(s.total), paid: String(s.paid), due: firstDue,
       planSelect: planSelectValue(s.planType, s.frequency),
       installmentAmount: s.installmentAmount ? String(s.installmentAmount) : "",
-      transportMonthlyAmount: s.transportMonthlyAmount ? String(s.transportMonthlyAmount) : "",
     });
     setShowAdd(true);
   }
@@ -1276,7 +1247,6 @@ function FeeLedger({ user, onLogout }) {
         .row-name { font-family: var(--display); font-weight:700; font-size:14.5px; color: var(--ink); letter-spacing: -0.1px; }
         .row-sub { font-family: var(--mono); font-size:11.5px; color:var(--text-mute); margin-top:3px; }
         .plan-chip { display:inline-flex; align-items:center; font-family: var(--mono); font-size:10px; font-weight:600; text-transform: uppercase; letter-spacing: 0.3px; color: var(--text-soft); background: var(--card-alt); border: 1px solid var(--line-soft); padding: 2px 7px; margin-top: 6px; }
-        .plan-chip.clickable:hover { background: var(--row-hover); border-color: var(--border); }
         .progress-track { height: 3px; background: var(--line-soft); margin-top: 7px; width: 140px; max-width: 60%; overflow:hidden; }
         .progress-fill { height: 100%; transition: width 0.4s ease; }
         .row-right { display:flex; align-items:center; gap:12px; }
@@ -1426,6 +1396,13 @@ function FeeLedger({ user, onLogout }) {
                   <div className="stat-card"><div className="stat-label">Overdue</div><div className="stat-value red">{stats.overdue}</div></div>
                   <div className="stat-card wide"><div className="stat-label">Collected this month</div><div className="stat-value">{money(thisMonthCollected)}</div></div>
                 </div>
+
+                {(stats.transportDue > 0 || stats.transportCollected > 0) && (
+                  <div className="stats-row">
+                    <div className="stat-card"><div className="stat-label">Transport collected</div><div className="stat-value">{money(stats.transportCollected)}</div></div>
+                    <div className="stat-card"><div className="stat-label">Transport due</div><div className="stat-value amber">{money(stats.transportDue)}</div></div>
+                  </div>
+                )}
               </>
             )}
           </>
@@ -1534,6 +1511,7 @@ function FeeLedger({ user, onLogout }) {
                 const installment = isInstallmentPlan(s);
                 const paidCount = installment ? (s.installments || []).filter((i) => i.paid).length : 0;
                 const totalCount = installment ? (s.installments || []).length : 0;
+                const transport = s.transportRate > 0 ? transportComputed(s) : null;
                 return (
                   <div className="row" key={s.id}>
                     {isCollector ? (
@@ -1552,14 +1530,9 @@ function FeeLedger({ user, onLogout }) {
                       {installment && (
                         <span className="plan-chip">{planLabel(s)} · {paidCount}/{totalCount} paid</span>
                       )}
-                      {(s.transportMonthlyAmount > 0 || (s.transportMonths || []).length > 0) && (
-                        <span
-                          className="plan-chip clickable"
-                          style={{ cursor: "pointer", marginLeft: installment ? 6 : 0 }}
-                          onClick={() => setTransportStudentId(s.id)}
-                        >
-                          <Bus size={11} style={{ verticalAlign: "-1.5px", marginRight: 3 }} />
-                          Transport · {transportStatusOf(s).paidCount}/{transportStatusOf(s).totalCount} paid
+                      {transport && transport.balance > 0 && (
+                        <span className="plan-chip" style={{ marginLeft: installment ? 6 : 0, color: "var(--over)", borderColor: "var(--over)" }}>
+                          <Bus size={11} style={{ verticalAlign: -2, marginRight: 3 }} />Transport {money(transport.balance)} due
                         </span>
                       )}
                       <div className="progress-track"><div className="progress-fill" style={{ width: `${pct}%`, background: meta.color }} /></div>
@@ -1579,6 +1552,11 @@ function FeeLedger({ user, onLogout }) {
                         {balance > 0 && (
                           <button className="icon-btn" title={installment ? "View schedule" : "Record payment"} onClick={() => (installment ? setScheduleStudentId(s.id) : setPayModal(s))}>
                             <IndianRupee size={14} />
+                          </button>
+                        )}
+                        {s.transportRate > 0 && (
+                          <button className="icon-btn" title="Transport" onClick={() => setTransportStudentId(s.id)}>
+                            <Bus size={14} />
                           </button>
                         )}
                         {!isCollector && (
@@ -1687,6 +1665,10 @@ function FeeLedger({ user, onLogout }) {
             <div className="field"><label>Parent WhatsApp number</label><input value={newStudent.phone} onChange={(e) => setNewStudent({ ...newStudent, phone: e.target.value })} placeholder="98XXXXXXXX" /></div>
             <div className="field"><label>Father's name</label><input value={newStudent.fatherName} onChange={(e) => setNewStudent({ ...newStudent, fatherName: e.target.value })} placeholder="Helps tell apart two students with the same name" /></div>
             <div className="field">
+              <label>Transport rate (₹/month, optional)</label>
+              <input type="number" value={newStudent.transportRate} onChange={(e) => setNewStudent({ ...newStudent, transportRate: e.target.value })} placeholder="Leave blank if this student doesn't use transport" />
+            </div>
+            <div className="field">
               <label>Payment plan</label>
               <select value={newStudent.planSelect} onChange={(e) => setNewStudent({ ...newStudent, planSelect: e.target.value })}>
                 {PLAN_SELECT_OPTIONS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
@@ -1710,11 +1692,6 @@ function FeeLedger({ user, onLogout }) {
                 {editingId && <p style={{ fontSize: 12, color: "var(--text-mute)", marginTop: -4, marginBottom: 12 }}>Changing the plan type, amount, or start date here rebuilds the payment schedule and clears paid marks. Other edits (name, class, phone) leave the schedule untouched.</p>}
               </>
             )}
-            <div className="field">
-              <label>Transport (₹/month, optional)</label>
-              <input type="number" value={newStudent.transportMonthlyAmount} onChange={(e) => setNewStudent({ ...newStudent, transportMonthlyAmount: e.target.value })} placeholder="Leave blank if not opted in" />
-              <p style={{ fontSize: 11.5, color: "var(--text-mute)", marginTop: 4 }}>Tracked separately from tuition. Parents can opt in or out month to month — not charged in June.</p>
-            </div>
             <button className="btn btn-primary" style={{ width: "100%", justifyContent: "center", opacity: savingStudent ? 0.6 : 1 }} disabled={savingStudent} onClick={saveStudent}>{savingStudent ? "Saving…" : editingId ? "Save changes" : "Add to ledger"}</button>
           </div>
         </div>
@@ -1926,9 +1903,10 @@ function FeeLedger({ user, onLogout }) {
       )}
 
       {transportStudent && (() => {
-        const tStatus = transportStatusOf(transportStudent);
-        const monthsByKey = Object.fromEntries((transportStudent.transportMonths || []).map((m) => [m.month, m]));
-        const amount = Number(transportStudent.transportMonthlyAmount) || 0;
+        const chargeable = currentAcademicYearTransportMonths();
+        const juneKey = `${chargeable[0].split("-")[0]}-06`;
+        const allMonths = [...chargeable.slice(0, 2), juneKey, ...chargeable.slice(2)];
+        const computed = transportComputed(transportStudent);
         return (
           <div className="modal-backdrop" onClick={() => setTransportStudentId(null)}>
             <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 440 }}>
@@ -1937,86 +1915,48 @@ function FeeLedger({ user, onLogout }) {
                 <button className="icon-btn" onClick={() => setTransportStudentId(null)}><X size={16} /></button>
               </div>
               <p style={{ fontSize: 13, color: "var(--text-soft)", marginBottom: 4 }}>
-                {transportStudent.name} · {amount > 0 ? `${money(amount)}/month` : "No monthly amount set"} · not charged in June
+                {transportStudent.name} · {money(transportStudent.transportRate)}/month
               </p>
               <p style={{ fontSize: 13, marginBottom: 12 }}>
-                <strong>{money(tStatus.paid)}</strong> paid of {money(tStatus.total)}
+                <strong>{money(computed.paid)}</strong> paid of {money(computed.total)}
+                {computed.balance > 0 && <span style={{ color: "var(--over)" }}> · {money(computed.balance)} due</span>}
               </p>
-              {amount <= 0 && (transportStudent.transportMonths || []).length === 0 ? (
-                <p style={{ fontSize: 12.5, color: "var(--text-mute)" }}>
-                  Set a monthly transport amount for this student under Edit to start opting them in.
-                </p>
-              ) : (
-                <div style={{ maxHeight: 340, overflow: "auto", marginBottom: 4 }}>
-                  {amount <= 0 && (
-                    <p style={{ fontSize: 11.5, color: "var(--text-mute)", marginBottom: 8 }}>
-                      No monthly amount is set right now, so no new months can be opted in — but existing months below are unaffected.
-                    </p>
-                  )}
-                  {transportAcademicMonthKeys().map((key) => {
-                    const meta = transportMonthMeta(key);
-                    const entry = monthsByKey[key];
-                    return (
-                      <div key={key} className="reminder-item" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-                        <div>
-                          <div style={{ fontWeight: 600, fontSize: 13.5 }}>{meta.period}</div>
-                          <div style={{ fontSize: 12, color: "var(--text-mute)" }}>
-                            {entry ? (
-                              <>{money(entry.amount)} · Due {entry.due}{entry.paid && entry.paidDate && <span> · Paid {new Date(entry.paidDate).toLocaleDateString()}</span>}</>
-                            ) : (
-                              <>Not opted in</>
-                            )}
-                          </div>
-                        </div>
-                        {!entry && amount > 0 && (
-                          <button className="btn btn-ghost" onClick={() => toggleTransportMonth(transportStudent.id, key)}>
-                            <Plus size={14} /> Opt in
-                          </button>
-                        )}
-                        {entry && entry.paid && (
-                          <span className="stamp" style={{ color: STAMP_META.paid.color, borderColor: STAMP_META.paid.border, background: STAMP_META.paid.bg }}>
-                            <Check size={11} strokeWidth={2.5} /> Paid
-                          </span>
-                        )}
-                        {entry && !entry.paid && (
-                          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                            <div style={{ display: "flex", border: "1px solid var(--border)", borderRadius: 6, overflow: "hidden" }}>
-                              <button
-                                type="button"
-                                className="btn btn-ghost"
-                                style={{
-                                  padding: "4px 8px", fontSize: 11.5, borderRadius: 0,
-                                  background: (transportMethodByMonth[key] || "cash") === "cash" ? "var(--highlight)" : "transparent",
-                                }}
-                                onClick={() => setTransportMethodByMonth((prev) => ({ ...prev, [key]: "cash" }))}
-                              >
-                                Cash
-                              </button>
-                              <button
-                                type="button"
-                                className="btn btn-ghost"
-                                style={{
-                                  padding: "4px 8px", fontSize: 11.5, borderRadius: 0,
-                                  background: transportMethodByMonth[key] === "upi_bank" ? "var(--highlight)" : "transparent",
-                                }}
-                                onClick={() => setTransportMethodByMonth((prev) => ({ ...prev, [key]: "upi_bank" }))}
-                              >
-                                UPI / Bank
-                              </button>
-                            </div>
-                            <button className="btn btn-primary" onClick={() => markTransportMonthPaid(transportStudent.id, key, transportMethodByMonth[key] || "cash")}>
-                              <Check size={14} /> Mark paid
-                            </button>
-                            {!isCollector && (
-                              <button className="icon-btn" title="Opt out of this month" onClick={() => toggleTransportMonth(transportStudent.id, key)}>
-                                <X size={14} />
-                              </button>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
+                {allMonths.map((key) => {
+                  const isJune = key === juneKey;
+                  const active = !isJune && (transportStudent.transportMonths || []).includes(key);
+                  return (
+                    <button
+                      key={key}
+                      type="button"
+                      disabled={isJune}
+                      onClick={() => toggleTransportMonth(transportStudent.id, key, !active)}
+                      className={active ? "btn btn-primary" : "btn btn-ghost"}
+                      style={{
+                        padding: "6px 10px", fontSize: 12.5,
+                        opacity: isJune ? 0.5 : 1,
+                        cursor: isJune ? "default" : "pointer",
+                      }}
+                      title={isJune ? "No transport charge in June (summer vacation)" : active ? "Opted in — tap to remove" : "Tap to opt in"}
+                    >
+                      {monthLabel(key)}{isJune && " · Summer"}
+                    </button>
+                  );
+                })}
+              </div>
+              {computed.balance > 0 && (
+                <div style={{ marginBottom: 16, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+                  <PaymentForm student={{ total: computed.total, paid: computed.paid }} onSubmit={(amt, method) => recordTransportPayment(transportStudent.id, amt, method)} />
+                </div>
+              )}
+              {(transportStudent.transportPayments || []).length > 0 && (
+                <div style={{ maxHeight: 180, overflow: "auto", paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+                  {[...(transportStudent.transportPayments || [])].reverse().map((p, i) => (
+                    <div className="history-item" key={i}>
+                      <div className="history-top"><span className="mono">{money(p.amount)}</span><span className="history-time">{new Date(p.date).toLocaleString()}</span></div>
+                      {p.method && <div style={{ fontSize: 11.5, color: "var(--text-mute)" }}>{p.method === "upi_bank" ? "UPI / Bank" : "Cash"}</div>}
+                    </div>
+                  ))}
                 </div>
               )}
             </div>
