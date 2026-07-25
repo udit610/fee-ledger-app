@@ -16,10 +16,16 @@ const FREQ_CONFIG = {
 };
 
 // The school's academic year runs April to March, not the calendar year. Quarterly
-// and biannual installments must land on the fixed academic terms (Q1 April, Q2
-// July, Q3 October, Q4 January) rather than just drifting 3/6 months from whatever
-// date happened to be typed into "Due" when the plan was set up.
-const ACADEMIC_MONTHS = { quarterly: [4, 7, 10, 1], biannual: [4, 10] };
+// lands on April/July/October/January, biannual on April/October, and monthly
+// always counts April through March — regardless of which month the "Due" date
+// typed (or imported from a spreadsheet) happens to fall in. Without this, two
+// students entered with due dates in different months would get monthly
+// schedules starting in different months too, instead of both running April→March.
+const ACADEMIC_MONTHS = {
+  quarterly: [4, 7, 10, 1],
+  biannual: [4, 10],
+  monthly: [4, 5, 6, 7, 8, 9, 10, 11, 12, 1, 2, 3],
+};
 
 function isInstallmentPlan(s) {
   return s.planType === "monthly" || s.planType === "quarterly";
