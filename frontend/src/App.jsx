@@ -828,7 +828,7 @@ function FeeLedger({ user, onLogout }) {
         const original = students.find((x) => x.id === editingId);
         const delta = Number(newStudent.paid || 0) - Number(original?.paid || 0);
         if (delta !== 0) {
-          payload.payments = [...(original?.payments || []), { amount: delta, date: new Date().toISOString(), note: "adjustment" }];
+          payload.payments = [...(original?.payments || []), { amount: delta, date: new Date().toISOString(), note: "adjustment", by: user.name || user.email }];
         }
       }
     } else if (!editingId) {
@@ -1800,7 +1800,7 @@ function FeeLedger({ user, onLogout }) {
             <div className="modal-head"><div className="modal-title">Payment history</div><button className="icon-btn" onClick={() => setHistoryStudent(null)}><X size={16} /></button></div>
             <p style={{ fontSize: 13, color: "var(--text-soft)", marginBottom: 12 }}>{historyStudent.name} · {money(historyStudent.paid)} paid of {money(historyStudent.total)}</p>
             {(historyStudent.payments || []).slice().reverse().map((p, i) => (
-              <div className="history-item" key={i}><div className="history-top"><span className="mono">{money(p.amount)}</span><span className="history-time">{new Date(p.date).toLocaleString()}</span></div>{p.method && <div style={{ fontSize: 11.5, color: "var(--text-mute)" }}>{p.method === "upi_bank" ? "UPI / Bank" : "Cash"}</div>}</div>
+              <div className="history-item" key={i}><div className="history-top"><span className="mono">{money(p.amount)}</span><span className="history-time">{new Date(p.date).toLocaleString()}</span></div>{(p.method || p.by) && <div style={{ fontSize: 11.5, color: "var(--text-mute)" }}>{p.method ? (p.method === "upi_bank" ? "UPI / Bank" : "Cash") : ""}{p.method && p.by ? " · " : ""}{p.by ? `Collected by ${p.by}` : ""}</div>}</div>
             ))}
             {(historyStudent.payments || []).length === 0 && <p style={{ fontSize: 12.5, color: "var(--text-mute)" }}>No payments logged yet.</p>}
 
@@ -1852,7 +1852,9 @@ function FeeLedger({ user, onLogout }) {
                     <div style={{ fontWeight: 600, fontSize: 13.5 }}>{inst.period}</div>
                     <div style={{ fontSize: 12, color: "var(--text-mute)" }}>
                       {money(inst.amount)} · Due {inst.due}
-                      {inst.paid && inst.paidDate && <span> · Paid {new Date(inst.paidDate).toLocaleDateString()}</span>}
+                      {inst.paid && inst.paidDate && (
+                        <span> · Paid {new Date(inst.paidDate).toLocaleString()}{inst.paidBy && ` by ${inst.paidBy}`}</span>
+                      )}
                     </div>
                   </div>
                   {inst.paid ? (
@@ -1925,21 +1927,27 @@ function FeeLedger({ user, onLogout }) {
                 {allMonths.map((key) => {
                   const isJune = key === juneKey;
                   const active = !isJune && (transportStudent.transportMonths || []).includes(key);
+                  const locked = isCollector && active; // collector can opt a month IN but not remove one already opted in
                   return (
                     <button
                       key={key}
                       type="button"
-                      disabled={isJune}
+                      disabled={isJune || locked}
                       onClick={() => toggleTransportMonth(transportStudent.id, key, !active)}
                       className={active ? "btn btn-primary" : "btn btn-ghost"}
                       style={{
                         padding: "6px 10px", fontSize: 12.5,
                         opacity: isJune ? 0.5 : 1,
-                        cursor: isJune ? "default" : "pointer",
+                        cursor: isJune || locked ? "default" : "pointer",
                       }}
-                      title={isJune ? "No transport charge in June (summer vacation)" : active ? "Opted in — tap to remove" : "Tap to opt in"}
+                      title={
+                        isJune ? "No transport charge in June (summer vacation)"
+                        : locked ? "Only an admin can remove a transport month once it's been added"
+                        : active ? "Opted in — tap to remove"
+                        : "Tap to opt in"
+                      }
                     >
-                      {monthLabel(key)}{isJune && " · Summer"}
+                      {monthLabel(key)}{isJune && " · Summer"}{locked && " 🔒"}
                     </button>
                   );
                 })}
@@ -1954,7 +1962,7 @@ function FeeLedger({ user, onLogout }) {
                   {[...(transportStudent.transportPayments || [])].reverse().map((p, i) => (
                     <div className="history-item" key={i}>
                       <div className="history-top"><span className="mono">{money(p.amount)}</span><span className="history-time">{new Date(p.date).toLocaleString()}</span></div>
-                      {p.method && <div style={{ fontSize: 11.5, color: "var(--text-mute)" }}>{p.method === "upi_bank" ? "UPI / Bank" : "Cash"}</div>}
+                      {(p.method || p.by) && <div style={{ fontSize: 11.5, color: "var(--text-mute)" }}>{p.method ? (p.method === "upi_bank" ? "UPI / Bank" : "Cash") : ""}{p.method && p.by ? " · " : ""}{p.by ? `Collected by ${p.by}` : ""}</div>}
                     </div>
                   ))}
                 </div>
