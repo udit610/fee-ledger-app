@@ -49,7 +49,10 @@ function planSelectValue(planType, frequency) {
 const FONT_IMPORT = `@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@500;600&family=Inter:wght@400;500;600;700;800&display=swap');`;
 
 const money = (n) => "₹" + Number(n || 0).toLocaleString("en-IN");
-const todayISO = () => new Date().toISOString().slice(0, 10);
+const todayISO = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
 const daysBetween = (a, b) => Math.round((new Date(a) - new Date(b)) / 86400000);
 
 function statusOf(student, today = todayISO()) {
@@ -61,10 +64,18 @@ function statusOf(student, today = todayISO()) {
 function addMonths(dateStr, n) {
   const d = new Date(dateStr + "T00:00:00");
   const day = d.getDate();
-  d.setMonth(d.getMonth() + n);
-  // guard against month-length overflow (e.g. Jan 31 + 1mo)
-  if (d.getDate() < day) d.setDate(0);
-  return d.toISOString().slice(0, 10);
+  // Do the month/year carry with plain integer math and build the string
+  // ourselves — never round-trip through toISOString(). That method reads the
+  // date back out in UTC, while it was parsed in local time above, so for
+  // anyone in a timezone ahead of UTC (e.g. India, UTC+5:30) every date this
+  // touched quietly shifted back by a day (this is exactly what made a Monthly
+  // plan's "first" installment show up as the previous month).
+  let targetMonth = d.getMonth() + n;
+  let targetYear = d.getFullYear() + Math.floor(targetMonth / 12);
+  targetMonth = ((targetMonth % 12) + 12) % 12;
+  const daysInTargetMonth = new Date(targetYear, targetMonth + 1, 0).getDate();
+  const clampedDay = Math.min(day, daysInTargetMonth); // guard against month-length overflow (e.g. Jan 31 + 1mo)
+  return `${targetYear}-${String(targetMonth + 1).padStart(2, "0")}-${String(clampedDay).padStart(2, "0")}`;
 }
 
 // Snaps a due date onto the school's fixed academic-year calendar (April–March),
@@ -275,7 +286,8 @@ function excelDateToISO(value) {
     return `${d.y}-${String(d.m).padStart(2, "0")}-${String(d.d).padStart(2, "0")}`;
   }
   const parsed = new Date(value);
-  return !isNaN(parsed) ? parsed.toISOString().slice(0, 10) : String(value);
+  if (isNaN(parsed)) return String(value);
+  return `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, "0")}-${String(parsed.getDate()).padStart(2, "0")}`;
 }
 
 function normalizeKey(k) {
