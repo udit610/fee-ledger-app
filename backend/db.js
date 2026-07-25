@@ -46,8 +46,10 @@ async function init() {
       installments JSONB DEFAULT '[]'::jsonb,
       payments JSONB DEFAULT '[]'::jsonb,
       history JSONB DEFAULT '[]'::jsonb,
-      transport_monthly_amount NUMERIC,
+      transport_rate NUMERIC DEFAULT 0,
       transport_months JSONB DEFAULT '[]'::jsonb,
+      transport_paid NUMERIC NOT NULL DEFAULT 0,
+      transport_payments JSONB DEFAULT '[]'::jsonb,
       created_at TIMESTAMPTZ DEFAULT now()
     );
   `);
@@ -55,10 +57,10 @@ async function init() {
   // CREATE TABLE IF NOT EXISTS above (that only runs against a table that
   // doesn't exist yet) — add it explicitly, idempotently, for those.
   await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS father_name TEXT DEFAULT '';`);
-  // Transport fee is opt-in per month, separate from the tuition ledger — see
-  // the toggleTransportMonth/markTransportMonthPaid functions below.
-  await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS transport_monthly_amount NUMERIC;`);
+  await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS transport_rate NUMERIC DEFAULT 0;`);
   await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS transport_months JSONB DEFAULT '[]'::jsonb;`);
+  await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS transport_paid NUMERIC NOT NULL DEFAULT 0;`);
+  await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS transport_payments JSONB DEFAULT '[]'::jsonb;`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS reminders (
       id TEXT PRIMARY KEY,
@@ -137,8 +139,10 @@ function toStudent(row) {
     installments: row.installments || [],
     payments: row.payments || [],
     history: row.history || [],
-    transportMonthlyAmount: row.transport_monthly_amount != null ? Number(row.transport_monthly_amount) : undefined,
+    transportRate: Number(row.transport_rate) || 0,
     transportMonths: row.transport_months || [],
+    transportPaid: Number(row.transport_paid) || 0,
+    transportPayments: row.transport_payments || [],
   };
 }
 
@@ -225,23 +229,6 @@ function generateInstallments(frequency, startDue, amount) {
   });
 }
 
-// Transport is opt-in month by month (not an upfront schedule like installments),
-// and is never charged in June since that's when summer vacation happens. Given a
-// "YYYY-MM" key, this returns the display label and a due date (the 10th of that
-// month, a fixed convention since there's no per-student anchor date to derive one
-// from the way tuition installments have). Returns null for an invalid or
-// June-shaped key so callers can reject it.
-function transportMonthMeta(monthKeyStr) {
-  const match = /^(\d{4})-(\d{2})$/.exec(String(monthKeyStr || ""));
-  if (!match) return null;
-  const year = Number(match[1]);
-  const monthNum = Number(match[2]);
-  if (monthNum < 1 || monthNum > 12 || monthNum === 6) return null;
-  const period = new Date(year, monthNum - 1, 1).toLocaleDateString("en-US", { month: "long", year: "numeric" });
-  const due = `${match[1]}-${match[2]}-10`;
-  return { period, due };
-}
-
 export const db = {
   async getStudents() {
     await ready;
@@ -252,8 +239,8 @@ export const db = {
   async addStudent(student) {
     await ready;
     const { rows } = await pool.query(
-      `INSERT INTO students (id, name, cls, school, phone, father_name, total, paid, due, plan_type, frequency, installment_amount, installments, payments, history, transport_monthly_amount, transport_months)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+      `INSERT INTO students (id, name, cls, school, phone, father_name, total, paid, due, plan_type, frequency, installment_amount, installments, payments, history, transport_rate, transport_months, transport_paid, transport_payments)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
        RETURNING *`,
       [
         student.id, student.name, student.cls, student.school, student.phone || "", student.fatherName || "",
@@ -263,8 +250,10 @@ export const db = {
         JSON.stringify(student.installments || []),
         JSON.stringify(student.payments || []),
         JSON.stringify(student.history || []),
-        student.transportMonthlyAmount != null ? Number(student.transportMonthlyAmount) : null,
+        student.transportRate || 0,
         JSON.stringify(student.transportMonths || []),
+        student.transportPaid || 0,
+        JSON.stringify(student.transportPayments || []),
       ]
     );
     return toStudent(rows[0]);
@@ -289,9 +278,9 @@ export const db = {
       total: "total", paid: "paid", due: "due",
       planType: "plan_type", frequency: "frequency", installmentAmount: "installment_amount",
       installments: "installments", payments: "payments", history: "history",
-      transportMonthlyAmount: "transport_monthly_amount", transportMonths: "transport_months",
+      transportRate: "transport_rate",
     };
-    const jsonFields = new Set(["installments", "payments", "history", "transportMonths"]);
+    const jsonFields = new Set(["installments", "payments", "history"]);
     const sets = [];
     const values = [];
     let i = 1;
@@ -341,6 +330,69 @@ export const db = {
     }
   },
 
+  // Toggles a single academic-year month ("2026-04") on/off in a student's transport
+  // opt-in list. Row-locked like addPayment — if the same student's transport is being
+  // toggled by two people at once, the second one waits instead of clobbering the first.
+  async toggleTransportMonth(id, monthKey, enabled) {
+    await ready;
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const { rows } = await client.query("SELECT * FROM students WHERE id = $1 FOR UPDATE", [id]);
+      if (!rows[0]) {
+        await safeRollback(client);
+        return null;
+      }
+      const s = toStudent(rows[0]);
+      const current = new Set(s.transportMonths || []);
+      if (enabled) current.add(monthKey);
+      else current.delete(monthKey);
+      const newMonths = Array.from(current).sort();
+      const { rows: updated } = await client.query(
+        "UPDATE students SET transport_months = $1 WHERE id = $2 RETURNING *",
+        [JSON.stringify(newMonths), id]
+      );
+      await client.query("COMMIT");
+      return toStudent(updated[0]);
+    } catch (err) {
+      await safeRollback(client);
+      throw err;
+    } finally {
+      client.release();
+    }
+  },
+
+  // Records a transport payment. Same shape/logic as addPayment, but against the
+  // separate transport_paid/transport_payments columns — transport is tracked as its
+  // own balance, entirely independent of the student's tuition total/paid.
+  async addTransportPayment(id, amount, method = "cash") {
+    await ready;
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const { rows } = await client.query("SELECT * FROM students WHERE id = $1 FOR UPDATE", [id]);
+      if (!rows[0]) {
+        await safeRollback(client);
+        return null;
+      }
+      const s = toStudent(rows[0]);
+      const transportTotal = (s.transportMonths || []).length * (s.transportRate || 0);
+      const newPaid = Math.min(transportTotal, (s.transportPaid || 0) + amount);
+      const newPayments = [...(s.transportPayments || []), { amount, date: new Date().toISOString(), method }];
+      const { rows: updated } = await client.query(
+        "UPDATE students SET transport_paid = $1, transport_payments = $2 WHERE id = $3 RETURNING *",
+        [newPaid, JSON.stringify(newPayments), id]
+      );
+      await client.query("COMMIT");
+      return toStudent(updated[0]);
+    } catch (err) {
+      await safeRollback(client);
+      throw err;
+    } finally {
+      client.release();
+    }
+  },
+
   // Marks exactly one installment paid on the server, inside a locked transaction.
   // This is the fix for the "two people editing at once" lost-update risk: the
   // frontend no longer computes and sends back the WHOLE installments array (which
@@ -375,97 +427,6 @@ export const db = {
       const { rows: updated } = await client.query(
         "UPDATE students SET installments = $1, paid = $2, payments = $3 WHERE id = $4 RETURNING *",
         [JSON.stringify(installments), paid, JSON.stringify(payments), id]
-      );
-      await client.query("COMMIT");
-      return { student: toStudent(updated[0]) };
-    } catch (err) {
-      await safeRollback(client);
-      throw err;
-    } finally {
-      client.release();
-    }
-  },
-
-  // Opts a student in or out of transport for one calendar month. Toggling on adds
-  // an unpaid entry (at the student's current transport_monthly_amount) to
-  // transport_months; toggling off removes it — but only if it hasn't been paid
-  // yet, since removing a paid month would silently erase money already collected.
-  // Same row-locked pattern as markInstallmentPaid, for the same reason: two people
-  // toggling the same student's transport at once shouldn't be able to race.
-  async toggleTransportMonth(id, monthKey) {
-    await ready;
-    const meta = transportMonthMeta(monthKey);
-    if (!meta) return { error: "invalid_month" };
-    const client = await pool.connect();
-    try {
-      await client.query("BEGIN");
-      const { rows } = await client.query("SELECT * FROM students WHERE id = $1 FOR UPDATE", [id]);
-      if (!rows[0]) {
-        await safeRollback(client);
-        return { error: "not_found" };
-      }
-      const s = toStudent(rows[0]);
-      const months = s.transportMonths || [];
-      const existing = months.find((m) => m.month === monthKey);
-      let nextMonths;
-      if (existing) {
-        if (existing.paid) {
-          await safeRollback(client);
-          return { error: "month_already_paid" };
-        }
-        nextMonths = months.filter((m) => m.month !== monthKey);
-      } else {
-        const amount = Number(s.transportMonthlyAmount) || 0;
-        if (amount <= 0) {
-          await safeRollback(client);
-          return { error: "no_amount_set" };
-        }
-        nextMonths = [...months, { month: monthKey, period: meta.period, due: meta.due, amount, paid: false, paidDate: null }]
-          .sort((a, b) => a.month.localeCompare(b.month));
-      }
-      const { rows: updated } = await client.query(
-        "UPDATE students SET transport_months = $1 WHERE id = $2 RETURNING *",
-        [JSON.stringify(nextMonths), id]
-      );
-      await client.query("COMMIT");
-      return { student: toStudent(updated[0]) };
-    } catch (err) {
-      await safeRollback(client);
-      throw err;
-    } finally {
-      client.release();
-    }
-  },
-
-  // Marks one already-opted-in transport month as paid. Mirrors markInstallmentPaid's
-  // locking so this can't race with a concurrent toggle/pay on the same student.
-  async markTransportMonthPaid(id, monthKey, method = "cash") {
-    await ready;
-    const client = await pool.connect();
-    try {
-      await client.query("BEGIN");
-      const { rows } = await client.query("SELECT * FROM students WHERE id = $1 FOR UPDATE", [id]);
-      if (!rows[0]) {
-        await safeRollback(client);
-        return { error: "not_found" };
-      }
-      const s = toStudent(rows[0]);
-      const months = s.transportMonths || [];
-      const entry = months.find((m) => m.month === monthKey);
-      if (!entry) {
-        await safeRollback(client);
-        return { error: "month_not_found" };
-      }
-      if (entry.paid) {
-        await safeRollback(client);
-        return { student: s, alreadyPaid: true };
-      }
-      const nextMonths = months.map((m) =>
-        m.month === monthKey ? { ...m, paid: true, paidDate: new Date().toISOString(), method } : m
-      );
-      const { rows: updated } = await client.query(
-        "UPDATE students SET transport_months = $1 WHERE id = $2 RETURNING *",
-        [JSON.stringify(nextMonths), id]
       );
       await client.query("COMMIT");
       return { student: toStudent(updated[0]) };
@@ -647,14 +608,13 @@ export const db = {
       await client.query("DELETE FROM expenses");
       for (const s of students) {
         await client.query(
-          `INSERT INTO students (id, name, cls, school, phone, father_name, total, paid, due, plan_type, frequency, installment_amount, installments, payments, history, transport_monthly_amount, transport_months)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+          `INSERT INTO students (id, name, cls, school, phone, father_name, total, paid, due, plan_type, frequency, installment_amount, installments, payments, history, transport_rate, transport_months, transport_paid, transport_payments)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
           [
             s.id, s.name, s.cls, s.school, s.phone || "", s.fatherName || "", s.total, s.paid || 0, s.due,
             s.planType || "full", s.frequency || null, s.installmentAmount ?? null,
             JSON.stringify(s.installments || []), JSON.stringify(s.payments || []), JSON.stringify(s.history || []),
-            s.transportMonthlyAmount != null ? Number(s.transportMonthlyAmount) : null,
-            JSON.stringify(s.transportMonths || []),
+            s.transportRate || 0, JSON.stringify(s.transportMonths || []), s.transportPaid || 0, JSON.stringify(s.transportPayments || []),
           ]
         );
       }
