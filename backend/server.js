@@ -171,7 +171,7 @@ app.get("/api/students", requireAuth, h(async (req, res) => {
 }));
 
 app.post("/api/students", requireAuth, requireAdmin, h(async (req, res) => {
-  const { name, cls, school, phone, total, paid, due, planType, frequency, installmentAmount, installments } = req.body;
+  const { name, cls, school, phone, fatherName, total, paid, due, planType, frequency, installmentAmount, installments } = req.body;
   if (!name || !total || !due) return res.status(400).json({ error: "name, total, and due are required" });
   if (!assertSchoolAllowed(req, res, school)) return;
   const student = {
@@ -180,6 +180,7 @@ app.post("/api/students", requireAuth, requireAdmin, h(async (req, res) => {
     cls: cls || "—",
     school,
     phone: phone || "",
+    fatherName: fatherName || "",
     total: Number(total),
     paid: Number(paid) || 0,
     due,
@@ -206,6 +207,7 @@ app.post("/api/students/bulk-import", requireAuth, requireAdmin, h(async (req, r
       cls: r.cls || "—",
       school: r.school,
       phone: r.phone || "",
+      fatherName: r.fatherName || "",
       total: Number(r.total),
       paid: Number(r.paid) || 0,
       due: r.due,
@@ -220,7 +222,7 @@ app.post("/api/students/bulk-import", requireAuth, requireAdmin, h(async (req, r
 }));
 
 // Fields worth tracking in the audit trail. Noisy/bulky fields (installments, payments) are excluded.
-const AUDIT_FIELDS = ["name", "cls", "school", "phone", "total", "paid", "due", "planType", "frequency", "installmentAmount"];
+const AUDIT_FIELDS = ["name", "cls", "school", "phone", "fatherName", "total", "paid", "due", "planType", "frequency", "installmentAmount"];
 
 app.put("/api/students/:id", requireAuth, requireAdmin, h(async (req, res) => {
   const all = await db.getStudents();
@@ -304,7 +306,7 @@ app.get("/api/reminders", requireAuth, requireAdmin, h(async (req, res) => {
   res.json(schools ? all.filter((r) => schools.includes(r.school)) : all);
 }));
 
-app.post("/api/reminders", requireAuth, requireAdmin, h(async (req, res) => {
+app.post("/api/reminders", requireAuth, h(async (req, res) => {
   const { studentId, name, school, phone, balance, message } = req.body;
   if (!assertSchoolAllowed(req, res, school)) return;
   const entry = {
