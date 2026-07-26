@@ -6,7 +6,7 @@ import { api } from "./api.js";
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID;
 const SCHOOLS = ["Vardhman Convent School", "Blossom Heights Pre-School"];
 const EXPENSE_CATEGORIES = ["Salaries", "Rent", "Utilities", "Maintenance", "Supplies", "Transport", "Food & Catering", "Marketing", "Miscellaneous"];
-const TEMPLATE_HEADERS = ["Name", "Class", "School", "Parent Phone", "Father's Name", "Total Fee", "Paid", "Due Date", "Quarterly/Biannual Amount", "Monthly Amount"];
+const TEMPLATE_HEADERS = ["Name", "Class", "School", "Parent Phone", "Father's Name", "Transport Rate", "Total Fee", "Paid", "Due Date", "Quarterly/Biannual Amount", "Monthly Amount"];
 
 // Installment plan configs, keyed by frequency
 const FREQ_CONFIG = {
@@ -282,10 +282,12 @@ function waLink(phone, message) {
 function exportLedger(students) {
   const rows = students.map((raw) => {
     const s = withComputed(raw);
+    const t = s.transportRate > 0 ? transportComputed(s) : null;
     return {
       Name: s.name, Class: s.cls, School: s.school, "Parent Phone": s.phone, "Father's Name": s.fatherName || "",
       Plan: planLabel(s),
       "Total Fee": s.total, Paid: s.paid, Balance: s.total - s.paid, "Due Date": s.due, Status: statusOf(s),
+      "Transport Rate": s.transportRate || "", "Transport Paid": t ? t.paid : "", "Transport Due": t ? t.balance : "",
     };
   });
   const ws = XLSX.utils.json_to_sheet(rows);
@@ -335,6 +337,7 @@ function parseWorkbook(arrayBuffer) {
     const school = String(map["school"] || "").trim();
     const phone = String(map["parentphone"] || map["phone"] || map["whatsapp"] || "").trim();
     const fatherName = String(map["fathersname"] || map["fathername"] || map["guardianname"] || "").trim();
+    const transportRate = Number(map["transportrate"] || map["transportfee"] || map["transportmonthly"] || 0);
     const paid = Number(map["paid"] || 0);
     const due = excelDateToISO(map["duedate"] || map["due"]);
     const monthlyAmount = Number(map["monthlyamount"] || 0);
@@ -360,7 +363,7 @@ function parseWorkbook(arrayBuffer) {
     if (!total || total <= 0) errors.push("Missing/invalid total fee (or installment amount)");
     if (!due) errors.push("Missing/invalid due date");
     return {
-      rowNum: i + 2, id: "tmp" + i, name, cls: cls || "—", school: school || SCHOOLS[0], phone, fatherName,
+      rowNum: i + 2, id: "tmp" + i, name, cls: cls || "—", school: school || SCHOOLS[0], phone, fatherName, transportRate,
       total, paid: paid || 0, due, planType, frequency, installmentAmount, errors,
     };
   });
@@ -1778,7 +1781,7 @@ function FeeLedger({ user, onLogout }) {
             <div className="modal-head"><div className="modal-title">Import from Excel</div><button className="icon-btn" onClick={() => { setShowImport(false); setImportRows(null); }}><X size={16} /></button></div>
             {!importRows && (
               <>
-                <p style={{ fontSize: 13, color: "var(--text-soft)", marginBottom: 12 }}>Columns: <strong>Name, Class, School, Parent Phone, Father's Name, Total Fee, Paid, Due Date</strong></p>
+                <p style={{ fontSize: 13, color: "var(--text-soft)", marginBottom: 12 }}>Columns: <strong>Name, Class, School, Parent Phone, Father's Name, Transport Rate, Total Fee, Paid, Due Date</strong> (Transport Rate is optional — leave blank if a student doesn't use transport)</p>
                 <button className="btn btn-ghost" style={{ width: "100%", justifyContent: "center", marginBottom: 10 }} onClick={downloadTemplate}><Download size={15} /> Download template</button>
                 <label className="btn btn-primary" style={{ width: "100%", justifyContent: "center", cursor: "pointer" }}>
                   <Upload size={15} /> Choose file
