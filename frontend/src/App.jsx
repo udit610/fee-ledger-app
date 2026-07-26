@@ -6,7 +6,12 @@ import { api } from "./api.js";
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID;
 const SCHOOLS = ["Vardhman Convent School", "Blossom Heights Pre-School"];
 const EXPENSE_CATEGORIES = ["Salaries", "Rent", "Utilities", "Maintenance", "Supplies", "Transport", "Food & Catering", "Marketing", "Miscellaneous"];
-const TEMPLATE_HEADERS = ["Name", "Class", "School", "Parent Phone", "Father's Name", "Transport Rate", "Total Fee", "Paid", "Due Date", "Quarterly/Biannual Amount", "Monthly Amount"];
+// Father's Name and Transport Rate deliberately sit at the END of this list, not
+// mixed in with the original columns. They were added after the original template
+// was already in use — putting them at the end means old spreadsheets (or habits)
+// built around the original column order paste in cleanly with these two just left
+// blank, instead of silently shifting Total Fee/Due Date etc. into the wrong columns.
+const TEMPLATE_HEADERS = ["Name", "Class", "School", "Parent Phone", "Total Fee", "Paid", "Due Date", "Quarterly/Biannual Amount", "Monthly Amount", "Father's Name", "Transport Rate"];
 
 // Installment plan configs, keyed by frequency
 const FREQ_CONFIG = {
@@ -362,9 +367,14 @@ function parseWorkbook(arrayBuffer) {
     if (!name) errors.push("Missing name");
     if (!total || total <= 0) errors.push("Missing/invalid total fee (or installment amount)");
     if (!due) errors.push("Missing/invalid due date");
+    // Doesn't block the row — a monthly transport rate landing at or above the
+    // student's total fee is almost always a sign the Transport Rate and Total Fee
+    // columns got swapped/misaligned somewhere upstream, not a genuine value, so
+    // it's flagged for a human to check rather than silently importing it.
+    const suspiciousTransportRate = transportRate > 0 && total > 0 && transportRate >= total;
     return {
       rowNum: i + 2, id: "tmp" + i, name, cls: cls || "—", school: school || SCHOOLS[0], phone, fatherName, transportRate,
-      total, paid: paid || 0, due, planType, frequency, installmentAmount, errors,
+      total, paid: paid || 0, due, planType, frequency, installmentAmount, errors, suspiciousTransportRate,
     };
   });
 }
@@ -1781,7 +1791,7 @@ function FeeLedger({ user, onLogout }) {
             <div className="modal-head"><div className="modal-title">Import from Excel</div><button className="icon-btn" onClick={() => { setShowImport(false); setImportRows(null); }}><X size={16} /></button></div>
             {!importRows && (
               <>
-                <p style={{ fontSize: 13, color: "var(--text-soft)", marginBottom: 12 }}>Columns: <strong>Name, Class, School, Parent Phone, Father's Name, Transport Rate, Total Fee, Paid, Due Date</strong> (Transport Rate is optional — leave blank if a student doesn't use transport)</p>
+                <p style={{ fontSize: 13, color: "var(--text-soft)", marginBottom: 12 }}>Columns: <strong>Name, Class, School, Parent Phone, Total Fee, Paid, Due Date, Father's Name, Transport Rate</strong> (Father's Name and Transport Rate are optional — leave blank if not applicable)</p>
                 <button className="btn btn-ghost" style={{ width: "100%", justifyContent: "center", marginBottom: 10 }} onClick={downloadTemplate}><Download size={15} /> Download template</button>
                 <label className="btn btn-primary" style={{ width: "100%", justifyContent: "center", cursor: "pointer" }}>
                   <Upload size={15} /> Choose file
@@ -1800,12 +1810,15 @@ function FeeLedger({ user, onLogout }) {
                 )}
                 <div style={{ maxHeight: 320, overflow: "auto", marginBottom: 12 }}>
                   {importRows.map((r) => (
-                    <div key={r.id} className="reminder-item" style={{ background: r.errors.length ? "rgba(255,59,48,0.12)" : r.duplicate ? "rgba(255,149,0,0.14)" : "#fff" }}>
+                    <div key={r.id} className="reminder-item" style={{ background: r.errors.length ? "rgba(255,59,48,0.12)" : (r.duplicate || r.suspiciousTransportRate) ? "rgba(255,149,0,0.14)" : "#fff" }}>
                       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, fontWeight: 600 }}><span>Row {r.rowNum}: {r.name || "(no name)"}</span><span className="mono">{money(r.total)}</span></div>
                       <div style={{ fontSize: 12, color: "var(--text-mute)" }}>{r.cls} · {r.school} · Due {r.due || "—"}</div>
                       {r.errors.length > 0 && <div style={{ fontSize: 11.5, color: "var(--over)", marginTop: 4 }}><AlertCircle size={12} style={{ verticalAlign: "middle" }} /> {r.errors.join(" · ")}</div>}
                       {r.duplicate && r.errors.length === 0 && (
                         <div style={{ fontSize: 11.5, color: "var(--due)", marginTop: 4 }}><AlertCircle size={12} style={{ verticalAlign: "middle" }} /> Looks like an existing student{skipDuplicates ? " — will be skipped" : ""}</div>
+                      )}
+                      {r.suspiciousTransportRate && r.errors.length === 0 && (
+                        <div style={{ fontSize: 11.5, color: "var(--due)", marginTop: 4 }}><AlertCircle size={12} style={{ verticalAlign: "middle" }} /> Transport rate ({money(r.transportRate)}) looks too high next to the total fee — check the Transport Rate and Total Fee columns aren't swapped</div>
                       )}
                     </div>
                   ))}
