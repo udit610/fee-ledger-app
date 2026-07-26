@@ -1485,6 +1485,15 @@ function FeeLedger({ user, onLogout }) {
                 onChange={setPlanFilter}
                 options={[{ value: "all", label: "All plans" }, ...PLAN_SELECT_OPTIONS.map((p) => ({ value: p.value, label: p.label }))]}
               />
+              <Dropdown
+                value={sortBy}
+                onChange={setSortBy}
+                options={[
+                  { value: "name", label: "Sort: Name" },
+                  { value: "overdue", label: "Sort: Most overdue" },
+                  { value: "balance", label: "Sort: Highest balance" },
+                ]}
+              />
               {students.some((s) => s.transportRate > 0) && (
                 <button
                   type="button"
@@ -1495,15 +1504,6 @@ function FeeLedger({ user, onLogout }) {
                   <Bus size={15} /> Transport
                 </button>
               )}
-              <Dropdown
-                value={sortBy}
-                onChange={setSortBy}
-                options={[
-                  { value: "name", label: "Sort: Name" },
-                  { value: "overdue", label: "Sort: Most overdue" },
-                  { value: "balance", label: "Sort: Highest balance" },
-                ]}
-              />
               {!isCollector && (
                 <>
                   <button className="btn btn-ghost" onClick={() => exportLedger(students)}><Download size={15} /> Export</button>
