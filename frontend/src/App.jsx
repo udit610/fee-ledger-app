@@ -11,7 +11,7 @@ const EXPENSE_CATEGORIES = ["Salaries", "Rent", "Utilities", "Maintenance", "Sup
 // was already in use — putting them at the end means old spreadsheets (or habits)
 // built around the original column order paste in cleanly with these two just left
 // blank, instead of silently shifting Total Fee/Due Date etc. into the wrong columns.
-const TEMPLATE_HEADERS = ["Name", "Class", "School", "Parent Phone", "Total Fee", "Paid", "Due Date", "Quarterly/Biannual Amount", "Monthly Amount", "Father's Name", "Transport Rate"];
+const TEMPLATE_HEADERS = ["Name", "Class", "School", "Parent Phone", "Total Fee", "Paid", "Due Date", "Quarterly Amount", "Biannual Amount", "Monthly Amount", "Father's Name", "Transport Rate"];
 
 // Installment plan configs, keyed by frequency
 const FREQ_CONFIG = {
@@ -304,10 +304,11 @@ function exportLedger(students) {
 function downloadTemplate() {
   const sample = [
     TEMPLATE_HEADERS,
-    ["Aarav Sharma", "Grade 4", "Vardhman Convent School", "9876500011", 18000, 18000, "2026-06-10", "", ""],
-    ["Ira Mehta", "Nursery", "Blossom Heights Pre-School", "9876500044", 9000, 0, "2026-07-01", "", ""],
-    ["Vihaan Kapoor", "Grade 2", "Vardhman Convent School", "9876500022", "", 0, "2026-06-10", "", 1500],
-    ["Myra Chopra", "Prep", "Blossom Heights Pre-School", "9876500033", "", 0, "2026-06-01", 4500, ""],
+    ["Aarav Sharma", "Grade 4", "Vardhman Convent School", "9876500011", 18000, 18000, "2026-06-10", "", "", "", "", ""],
+    ["Ira Mehta", "Nursery", "Blossom Heights Pre-School", "9876500044", 9000, 0, "2026-07-01", "", "", "", "", 600],
+    ["Vihaan Kapoor", "Grade 2", "Vardhman Convent School", "9876500022", "", 0, "2026-06-10", "", "", 1500, "", ""],
+    ["Myra Chopra", "Prep", "Blossom Heights Pre-School", "9876500033", "", 0, "2026-06-01", 4500, "", "", "", ""],
+    ["Kabir Rao", "Grade 6", "Vardhman Convent School", "9876500055", "", 0, "2026-04-15", "", 9000, "", "Ramesh Rao", ""],
   ];
   const ws = XLSX.utils.aoa_to_sheet(sample);
   const wb = XLSX.utils.book_new();
@@ -346,7 +347,8 @@ function parseWorkbook(arrayBuffer) {
     const paid = Number(map["paid"] || 0);
     const due = excelDateToISO(map["duedate"] || map["due"]);
     const monthlyAmount = Number(map["monthlyamount"] || 0);
-    const qtrBiannualAmount = Number(map["quarterlybiannualamount"] || map["quarterlyamount"] || map["biannualamount"] || 0);
+    const quarterlyAmount = Number(map["quarterlyamount"] || 0);
+    const biannualAmount = Number(map["biannualamount"] || map["halfyearlyamount"] || map["semiannualamount"] || 0);
 
     let planType = "full";
     let frequency = null;
@@ -355,13 +357,19 @@ function parseWorkbook(arrayBuffer) {
       planType = "monthly";
       frequency = "monthly";
       installmentAmount = monthlyAmount;
-    } else if (qtrBiannualAmount > 0) {
-      // Excel can't distinguish Quarterly vs Biannual in one merged column — defaults to Quarterly.
+    } else if (quarterlyAmount > 0) {
       planType = "quarterly";
       frequency = "quarterly";
-      installmentAmount = qtrBiannualAmount;
+      installmentAmount = quarterlyAmount;
+    } else if (biannualAmount > 0) {
+      planType = "quarterly"; // "quarterly" is the internal planType for both Quarterly and Biannual — frequency is what distinguishes them
+      frequency = "biannual";
+      installmentAmount = biannualAmount;
     }
-    const total = planType === "full" ? Number(map["totalfee"] || map["total"] || 0) : installmentAmount * FREQ_CONFIG[frequency].count;
+    // "Annual Amount" is just another name for a one-time full payment — same thing
+    // "Total Fee" already means, so it's accepted as an alias rather than needing
+    // its own separate plan type.
+    const total = planType === "full" ? Number(map["totalfee"] || map["total"] || map["annualamount"] || 0) : installmentAmount * FREQ_CONFIG[frequency].count;
 
     const errors = [];
     if (!name) errors.push("Missing name");
@@ -1791,7 +1799,9 @@ function FeeLedger({ user, onLogout }) {
             <div className="modal-head"><div className="modal-title">Import from Excel</div><button className="icon-btn" onClick={() => { setShowImport(false); setImportRows(null); }}><X size={16} /></button></div>
             {!importRows && (
               <>
-                <p style={{ fontSize: 13, color: "var(--text-soft)", marginBottom: 12 }}>Columns: <strong>Name, Class, School, Parent Phone, Total Fee, Paid, Due Date, Father's Name, Transport Rate</strong> (Father's Name and Transport Rate are optional — leave blank if not applicable)</p>
+                <p style={{ fontSize: 13, color: "var(--text-soft)", marginBottom: 12 }}>
+                  Columns: <strong>Name, Class, School, Parent Phone, Total Fee, Paid, Due Date</strong>, plus <strong>Quarterly Amount</strong>, <strong>Biannual Amount</strong>, or <strong>Monthly Amount</strong> for an installment plan (leave Total Fee blank if using one of these — it's calculated automatically). <strong>Father's Name</strong> and <strong>Transport Rate</strong> are optional.
+                </p>
                 <button className="btn btn-ghost" style={{ width: "100%", justifyContent: "center", marginBottom: 10 }} onClick={downloadTemplate}><Download size={15} /> Download template</button>
                 <label className="btn btn-primary" style={{ width: "100%", justifyContent: "center", cursor: "pointer" }}>
                   <Upload size={15} /> Choose file
