@@ -209,6 +209,7 @@ app.post("/api/students/bulk-import", requireAuth, requireAdmin, h(async (req, r
       school: r.school,
       phone: r.phone || "",
       fatherName: r.fatherName || "",
+      transportRate: Number(r.transportRate) || 0,
       total: Number(r.total),
       paid: Number(r.paid) || 0,
       due: r.due,
