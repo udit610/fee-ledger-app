@@ -1623,7 +1623,7 @@ function FeeLedger({ user, onLogout }) {
                       )}
                       {s.previousSessionDue > 0 && (
                         <span className="plan-chip" style={{ marginLeft: installment || (transport && transport.balance > 0) ? 6 : 0, color: "var(--over)", borderColor: "var(--over)" }}>
-                          <History size={11} style={{ verticalAlign: -2, marginRight: 3 }} />Previous session {money(s.previousSessionDue)} due
+                          <Clock size={11} style={{ verticalAlign: -2, marginRight: 3 }} />Previous session {money(s.previousSessionDue)} due
                         </span>
                       )}
                       <div className="progress-track"><div className="progress-fill" style={{ width: `${pct}%`, background: meta.color }} /></div>
@@ -1652,9 +1652,12 @@ function FeeLedger({ user, onLogout }) {
                         )}
                         {s.previousSessionDue > 0 && (
                           <button className="icon-btn" title="Previous session dues" onClick={() => setPreviousSessionStudentId(s.id)} style={{ color: "var(--over)" }}>
-                            <History size={14} />
+                            <Clock size={14} />
                           </button>
                         )}
+                        <button className="icon-btn" title="Payment history" onClick={() => setHistoryStudent(s)}>
+                          <History size={14} />
+                        </button>
                         {!isCollector && (
                           <>
                             <button className="icon-btn" title="Edit" onClick={() => openEdit(s)}><Pencil size={14} /></button>
