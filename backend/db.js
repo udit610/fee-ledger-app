@@ -50,6 +50,9 @@ async function init() {
       transport_months JSONB DEFAULT '[]'::jsonb,
       transport_paid NUMERIC NOT NULL DEFAULT 0,
       transport_payments JSONB DEFAULT '[]'::jsonb,
+      session_year INTEGER,
+      previous_session_due NUMERIC NOT NULL DEFAULT 0,
+      previous_session_payments JSONB DEFAULT '[]'::jsonb,
       created_at TIMESTAMPTZ DEFAULT now()
     );
   `);
@@ -61,6 +64,16 @@ async function init() {
   await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS transport_months JSONB DEFAULT '[]'::jsonb;`);
   await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS transport_paid NUMERIC NOT NULL DEFAULT 0;`);
   await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS transport_payments JSONB DEFAULT '[]'::jsonb;`);
+  await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS previous_session_due NUMERIC NOT NULL DEFAULT 0;`);
+  await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS previous_session_payments JSONB DEFAULT '[]'::jsonb;`);
+  // session_year needs special care: on a brand-new table it's fine to leave it
+  // NULL (addStudent always sets it going forward). But on an EXISTING database,
+  // adding this column with no value would make every existing student look like
+  // they're behind on their session the moment this ships, rolling everyone's
+  // real balances into "previous session due" on the next request. Backfilling
+  // it to the CURRENT academic year for anyone who doesn't have one yet avoids that.
+  await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS session_year INTEGER;`);
+  await pool.query(`UPDATE students SET session_year = $1 WHERE session_year IS NULL;`, [currentAcademicYearStart()]);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS reminders (
       id TEXT PRIMARY KEY,
@@ -143,6 +156,9 @@ function toStudent(row) {
     transportMonths: row.transport_months || [],
     transportPaid: Number(row.transport_paid) || 0,
     transportPayments: row.transport_payments || [],
+    sessionYear: row.session_year,
+    previousSessionDue: Number(row.previous_session_due) || 0,
+    previousSessionPayments: row.previous_session_payments || [],
   };
 }
 
@@ -181,6 +197,14 @@ const FREQ_CONFIG = {
   quarterly: { count: 4, monthsApart: 3, label: "Quarter" },
   biannual: { count: 2, monthsApart: 6, label: "Half" },
 };
+
+// The academic year this exact moment falls into, expressed as its START year
+// (e.g. April 2026 through March 2027 is academic year 2026). Used both for the
+// installment-schedule anchoring below and for session rollover further down.
+function currentAcademicYearStart() {
+  const now = new Date();
+  return now.getMonth() + 1 >= 4 ? now.getFullYear() : now.getFullYear() - 1;
+}
 
 // The school's academic year runs April to March — see matching comment in App.jsx.
 const ACADEMIC_MONTHS = {
@@ -239,8 +263,8 @@ export const db = {
   async addStudent(student) {
     await ready;
     const { rows } = await pool.query(
-      `INSERT INTO students (id, name, cls, school, phone, father_name, total, paid, due, plan_type, frequency, installment_amount, installments, payments, history, transport_rate, transport_months, transport_paid, transport_payments)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+      `INSERT INTO students (id, name, cls, school, phone, father_name, total, paid, due, plan_type, frequency, installment_amount, installments, payments, history, transport_rate, transport_months, transport_paid, transport_payments, session_year, previous_session_due, previous_session_payments)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
        RETURNING *`,
       [
         student.id, student.name, student.cls, student.school, student.phone || "", student.fatherName || "",
@@ -254,6 +278,9 @@ export const db = {
         JSON.stringify(student.transportMonths || []),
         student.transportPaid || 0,
         JSON.stringify(student.transportPayments || []),
+        student.sessionYear ?? currentAcademicYearStart(),
+        student.previousSessionDue || 0,
+        JSON.stringify(student.previousSessionPayments || []),
       ]
     );
     return toStudent(rows[0]);
@@ -279,6 +306,7 @@ export const db = {
       planType: "plan_type", frequency: "frequency", installmentAmount: "installment_amount",
       installments: "installments", payments: "payments", history: "history",
       transportRate: "transport_rate",
+      previousSessionDue: "previous_session_due",
     };
     const jsonFields = new Set(["installments", "payments", "history"]);
     const sets = [];
@@ -319,6 +347,37 @@ export const db = {
       const { rows: updated } = await client.query(
         "UPDATE students SET paid = $1, payments = $2 WHERE id = $3 RETURNING *",
         [newPaid, JSON.stringify(newPayments), id]
+      );
+      await client.query("COMMIT");
+      return toStudent(updated[0]);
+    } catch (err) {
+      await safeRollback(client);
+      throw err;
+    } finally {
+      client.release();
+    }
+  },
+
+  // Records a payment against previous_session_due — a separate ledger from the
+  // current session's paid/total, same as transport. Staff choose which balance a
+  // payment applies to by which icon/panel they open, rather than picking a target
+  // inside one shared form.
+  async addPreviousSessionPayment(id, amount, method = "cash", by = "") {
+    await ready;
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const { rows } = await client.query("SELECT * FROM students WHERE id = $1 FOR UPDATE", [id]);
+      if (!rows[0]) {
+        await safeRollback(client);
+        return null;
+      }
+      const s = toStudent(rows[0]);
+      const newDue = Math.max(0, (s.previousSessionDue || 0) - amount);
+      const newPayments = [...(s.previousSessionPayments || []), { amount, date: new Date().toISOString(), method, by }];
+      const { rows: updated } = await client.query(
+        "UPDATE students SET previous_session_due = $1, previous_session_payments = $2 WHERE id = $3 RETURNING *",
+        [newDue, JSON.stringify(newPayments), id]
       );
       await client.query("COMMIT");
       return toStudent(updated[0]);
@@ -600,6 +659,60 @@ export const db = {
     if (rows.length === 0) await db.snapshot("daily");
   },
 
+  // Called opportunistically on normal page-load traffic, same pattern as
+  // ensureDailySnapshot above — no separate cron needed. Any student whose
+  // session_year is behind the CURRENT academic year (computed from the server's
+  // clock, crossing over every April 1) gets rolled over automatically: whatever
+  // they still owed gets added to previous_session_due (additive, in case the app
+  // wasn't opened for more than one rollover in a row — unlikely, but this stays
+  // correct either way), and total/paid/installments/payments reset to a blank
+  // slate for the new session, ready for that year's fee to be entered/imported.
+  // A one-line note is appended to history so the reset is visible in the audit
+  // trail rather than looking like the balance just vanished.
+  async ensureSessionRollover() {
+    await ready;
+    const year = currentAcademicYearStart();
+    const { rows } = await pool.query("SELECT id FROM students WHERE session_year < $1", [year]);
+    if (rows.length === 0) return;
+    for (const { id } of rows) {
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        const { rows: locked } = await client.query("SELECT * FROM students WHERE id = $1 FOR UPDATE", [id]);
+        const s = locked[0];
+        if (!s || Number(s.session_year) >= year) {
+          // Already rolled over by a concurrent request, or somehow caught up — skip.
+          await client.query("COMMIT");
+          client.release();
+          continue;
+        }
+        const leftover = Math.max(0, Number(s.total) - Number(s.paid));
+        const newPreviousDue = Number(s.previous_session_due || 0) + leftover;
+        const history = [
+          ...(s.history || []),
+          {
+            field: "session_rollover",
+            oldValue: `Session ${s.session_year}: ${s.total} total, ${s.paid} paid`,
+            newValue: leftover > 0 ? `₹${leftover} carried to previous session dues` : "No balance carried over",
+            by: "system",
+            at: new Date().toISOString(),
+          },
+        ];
+        await client.query(
+          `UPDATE students SET session_year = $1, previous_session_due = $2, total = 0, paid = 0,
+           installments = '[]', payments = '[]', history = $3 WHERE id = $4`,
+          [year, newPreviousDue, JSON.stringify(history), id]
+        );
+        await client.query("COMMIT");
+      } catch (err) {
+        await safeRollback(client);
+        throw err;
+      } finally {
+        client.release();
+      }
+    }
+  },
+
   async listSnapshots() {
     await ready;
     const { rows } = await pool.query(
@@ -628,13 +741,14 @@ export const db = {
       await client.query("DELETE FROM expenses");
       for (const s of students) {
         await client.query(
-          `INSERT INTO students (id, name, cls, school, phone, father_name, total, paid, due, plan_type, frequency, installment_amount, installments, payments, history, transport_rate, transport_months, transport_paid, transport_payments)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
+          `INSERT INTO students (id, name, cls, school, phone, father_name, total, paid, due, plan_type, frequency, installment_amount, installments, payments, history, transport_rate, transport_months, transport_paid, transport_payments, session_year, previous_session_due, previous_session_payments)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`,
           [
             s.id, s.name, s.cls, s.school, s.phone || "", s.fatherName || "", s.total, s.paid || 0, s.due,
             s.planType || "full", s.frequency || null, s.installmentAmount ?? null,
             JSON.stringify(s.installments || []), JSON.stringify(s.payments || []), JSON.stringify(s.history || []),
             s.transportRate || 0, JSON.stringify(s.transportMonths || []), s.transportPaid || 0, JSON.stringify(s.transportPayments || []),
+            s.sessionYear ?? currentAcademicYearStart(), s.previousSessionDue || 0, JSON.stringify(s.previousSessionPayments || []),
           ]
         );
       }
