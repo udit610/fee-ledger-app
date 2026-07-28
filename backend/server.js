@@ -227,6 +227,10 @@ app.post("/api/students/bulk-import", requireAuth, requireAdmin, h(async (req, r
 // Fields worth tracking in the audit trail. Noisy/bulky fields (installments, payments) are excluded.
 const AUDIT_FIELDS = ["name", "cls", "school", "phone", "fatherName", "total", "paid", "due", "planType", "frequency", "installmentAmount", "transportRate", "previousSessionDue"];
 
+function maxAllowedExpenseDate() {
+  return new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
 app.put("/api/students/:id", requireAuth, requireAdmin, h(async (req, res) => {
   const all = await db.getStudents();
   const existing = all.find((s) => s.id === req.params.id);
@@ -405,6 +409,11 @@ app.post("/api/expenses", requireAuth, h(async (req, res) => {
   const { school, category, description, vendor, amount, date } = req.body;
   if (!school || !amount || !date) return res.status(400).json({ error: "school, amount, and date are required" });
   if (!assertSchoolAllowed(req, res, school)) return;
+  // Loose check on purpose: the server's clock is UTC while schools run on IST, so
+  // comparing against the server's exact "today" would falsely reject a perfectly
+  // legitimate same-day submission for part of the day. A 1-day buffer safely covers
+  // that skew while still catching genuinely future-dated entries.
+  if (date > maxAllowedExpenseDate()) return res.status(400).json({ error: "Expense date can't be in the future" });
   const expense = {
     id: "e" + Date.now() + Math.random().toString(36).slice(2, 7),
     school, category: category || "Miscellaneous", description: description || "", vendor: vendor || "",
@@ -423,6 +432,7 @@ app.put("/api/expenses/:id", requireAuth, requireAdmin, h(async (req, res) => {
 
   const patch = { ...req.body };
   if (patch.amount != null) patch.amount = Number(patch.amount);
+  if (patch.date && patch.date > maxAllowedExpenseDate()) return res.status(400).json({ error: "Expense date can't be in the future" });
 
   const changes = [];
   const now = new Date().toISOString();
