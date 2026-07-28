@@ -50,6 +50,9 @@ async function init() {
       transport_months JSONB DEFAULT '[]'::jsonb,
       transport_paid NUMERIC NOT NULL DEFAULT 0,
       transport_payments JSONB DEFAULT '[]'::jsonb,
+      annual_fee_amount NUMERIC DEFAULT 0,
+      annual_fee_paid NUMERIC NOT NULL DEFAULT 0,
+      annual_fee_payments JSONB DEFAULT '[]'::jsonb,
       session_year INTEGER,
       previous_session_due NUMERIC NOT NULL DEFAULT 0,
       previous_session_payments JSONB DEFAULT '[]'::jsonb,
@@ -66,6 +69,9 @@ async function init() {
   await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS transport_payments JSONB DEFAULT '[]'::jsonb;`);
   await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS previous_session_due NUMERIC NOT NULL DEFAULT 0;`);
   await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS previous_session_payments JSONB DEFAULT '[]'::jsonb;`);
+  await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS annual_fee_amount NUMERIC DEFAULT 0;`);
+  await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS annual_fee_paid NUMERIC NOT NULL DEFAULT 0;`);
+  await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS annual_fee_payments JSONB DEFAULT '[]'::jsonb;`);
   // session_year needs special care: on a brand-new table it's fine to leave it
   // NULL (addStudent always sets it going forward). But on an EXISTING database,
   // adding this column with no value would make every existing student look like
@@ -156,6 +162,9 @@ function toStudent(row) {
     transportMonths: row.transport_months || [],
     transportPaid: Number(row.transport_paid) || 0,
     transportPayments: row.transport_payments || [],
+    annualFeeAmount: Number(row.annual_fee_amount) || 0,
+    annualFeePaid: Number(row.annual_fee_paid) || 0,
+    annualFeePayments: row.annual_fee_payments || [],
     sessionYear: row.session_year,
     previousSessionDue: Number(row.previous_session_due) || 0,
     previousSessionPayments: row.previous_session_payments || [],
@@ -263,8 +272,8 @@ export const db = {
   async addStudent(student) {
     await ready;
     const { rows } = await pool.query(
-      `INSERT INTO students (id, name, cls, school, phone, father_name, total, paid, due, plan_type, frequency, installment_amount, installments, payments, history, transport_rate, transport_months, transport_paid, transport_payments, session_year, previous_session_due, previous_session_payments)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+      `INSERT INTO students (id, name, cls, school, phone, father_name, total, paid, due, plan_type, frequency, installment_amount, installments, payments, history, transport_rate, transport_months, transport_paid, transport_payments, session_year, previous_session_due, previous_session_payments, annual_fee_amount, annual_fee_paid, annual_fee_payments)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
        RETURNING *`,
       [
         student.id, student.name, student.cls, student.school, student.phone || "", student.fatherName || "",
@@ -281,6 +290,9 @@ export const db = {
         student.sessionYear ?? currentAcademicYearStart(),
         student.previousSessionDue || 0,
         JSON.stringify(student.previousSessionPayments || []),
+        student.annualFeeAmount || 0,
+        student.annualFeePaid || 0,
+        JSON.stringify(student.annualFeePayments || []),
       ]
     );
     return toStudent(rows[0]);
@@ -306,6 +318,7 @@ export const db = {
       planType: "plan_type", frequency: "frequency", installmentAmount: "installment_amount",
       installments: "installments", payments: "payments", history: "history",
       transportRate: "transport_rate",
+      annualFeeAmount: "annual_fee_amount",
       previousSessionDue: "previous_session_due",
     };
     const jsonFields = new Set(["installments", "payments", "history"]);
@@ -462,316 +475,4 @@ export const db = {
 
   // Full reset of a student's transport ledger — clears every opted-in month, the
   // paid total, and the payment log. Admin-only (enforced in server.js), same
-  // destructive-reset pattern as the tuition "Regenerate schedule" button.
-  async resetTransport(id) {
-    await ready;
-    const { rows } = await pool.query(
-      "UPDATE students SET transport_months = '[]', transport_paid = 0, transport_payments = '[]' WHERE id = $1 RETURNING *",
-      [id]
-    );
-    return rows[0] ? toStudent(rows[0]) : null;
-  },
-
-  // Marks exactly one installment paid on the server, inside a locked transaction.
-  // This is the fix for the "two people editing at once" lost-update risk: the
-  // frontend no longer computes and sends back the WHOLE installments array (which
-  // could be based on stale data) — it just says "mark this one period paid" and the
-  // database does the read-modify-write atomically, so concurrent marks can't clobber
-  // each other no matter how close together they happen.
-  async markInstallmentPaid(id, period, method = "cash", by = "") {
-    await ready;
-    const client = await pool.connect();
-    try {
-      await client.query("BEGIN");
-      const { rows } = await client.query("SELECT * FROM students WHERE id = $1 FOR UPDATE", [id]);
-      if (!rows[0]) {
-        await safeRollback(client);
-        return { error: "not_found" };
-      }
-      const s = toStudent(rows[0]);
-      const inst = (s.installments || []).find((i) => i.period === period);
-      if (!inst) {
-        await safeRollback(client);
-        return { error: "period_not_found" };
-      }
-      if (inst.paid) {
-        await safeRollback(client);
-        return { student: s, alreadyPaid: true };
-      }
-      const installments = s.installments.map((i) =>
-        i.period === period ? { ...i, paid: true, paidDate: new Date().toISOString(), paidBy: by } : i
-      );
-      const paid = installments.filter((i) => i.paid).reduce((a, i) => a + Number(i.amount || 0), 0);
-      const payments = [...(s.payments || []), { amount: inst.amount, date: new Date().toISOString(), note: inst.period, method, by }];
-      const { rows: updated } = await client.query(
-        "UPDATE students SET installments = $1, paid = $2, payments = $3 WHERE id = $4 RETURNING *",
-        [JSON.stringify(installments), paid, JSON.stringify(payments), id]
-      );
-      await client.query("COMMIT");
-      return { student: toStudent(updated[0]) };
-    } catch (err) {
-      await safeRollback(client);
-      throw err;
-    } finally {
-      client.release();
-    }
-  },
-
-  // Rebuilds an installment-plan student's schedule from scratch, entirely
-  // server-side and inside the same FOR UPDATE lock pattern as above. The
-  // frontend used to compute the new installments array itself and PUT the
-  // whole thing back — same lost-update risk as markInstallmentPaid had, just
-  // rarer in practice since it's gated behind an explicit confirm dialog.
-  async regenerateSchedule(id) {
-    await ready;
-    const client = await pool.connect();
-    try {
-      await client.query("BEGIN");
-      const { rows } = await client.query("SELECT * FROM students WHERE id = $1 FOR UPDATE", [id]);
-      if (!rows[0]) {
-        await safeRollback(client);
-        return { error: "not_found" };
-      }
-      const s = toStudent(rows[0]);
-      if (s.planType !== "monthly" && s.planType !== "quarterly") {
-        await safeRollback(client);
-        return { error: "not_installment_plan" };
-      }
-      const startDue = s.due || (s.installments && s.installments[0] && s.installments[0].due);
-      const installments = generateInstallments(s.frequency, startDue, s.installmentAmount);
-      const total = installments.reduce((a, i) => a + Number(i.amount || 0), 0);
-      const { rows: updated } = await client.query(
-        "UPDATE students SET installments = $1, total = $2, paid = 0, payments = '[]' WHERE id = $3 RETURNING *",
-        [JSON.stringify(installments), total, id]
-      );
-      await client.query("COMMIT");
-      return { student: toStudent(updated[0]) };
-    } catch (err) {
-      await safeRollback(client);
-      throw err;
-    } finally {
-      client.release();
-    }
-  },
-
-  async deleteStudent(id) {
-    await ready;
-    await pool.query("DELETE FROM students WHERE id = $1", [id]);
-  },
-
-  async getReminders() {
-    await ready;
-    const { rows } = await pool.query("SELECT * FROM reminders ORDER BY seq DESC");
-    return rows.map(toReminder);
-  },
-
-  async addReminder(reminder) {
-    await ready;
-    const { rows } = await pool.query(
-      `INSERT INTO reminders (id, student_id, name, school, phone, balance, message, sent_at, sent_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
-      [reminder.id, reminder.studentId, reminder.name, reminder.school, reminder.phone, reminder.balance ?? null, reminder.message, reminder.sentAt, reminder.sentBy]
-    );
-    return toReminder(rows[0]);
-  },
-
-  // ---------- Expenses ----------
-
-  async getExpenses() {
-    await ready;
-    const { rows } = await pool.query("SELECT * FROM expenses ORDER BY seq DESC");
-    return rows.map(toExpense);
-  },
-
-  async addExpense(expense) {
-    await ready;
-    const { rows } = await pool.query(
-      `INSERT INTO expenses (id, school, category, description, vendor, amount, date, history)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-      [
-        expense.id, expense.school, expense.category || "Miscellaneous", expense.description || "",
-        expense.vendor || "", Number(expense.amount) || 0, expense.date,
-        JSON.stringify(expense.history || []),
-      ]
-    );
-    return toExpense(rows[0]);
-  },
-
-  async updateExpense(id, patch) {
-    await ready;
-    const fieldMap = { school: "school", category: "category", description: "description", vendor: "vendor", amount: "amount", date: "date", history: "history" };
-    const jsonFields = new Set(["history"]);
-    const sets = [];
-    const values = [];
-    let i = 1;
-    for (const [key, col] of Object.entries(fieldMap)) {
-      if (key in patch) {
-        sets.push(`${col} = $${i}`);
-        values.push(jsonFields.has(key) ? JSON.stringify(patch[key]) : patch[key]);
-        i++;
-      }
-    }
-    if (!sets.length) {
-      const { rows } = await pool.query("SELECT * FROM expenses WHERE id = $1", [id]);
-      return rows[0] ? toExpense(rows[0]) : null;
-    }
-    values.push(id);
-    const { rows } = await pool.query(`UPDATE expenses SET ${sets.join(", ")} WHERE id = $${i} RETURNING *`, values);
-    return rows[0] ? toExpense(rows[0]) : null;
-  },
-
-  async deleteExpense(id) {
-    await ready;
-    await pool.query("DELETE FROM expenses WHERE id = $1", [id]);
-  },
-
-  async exportAll() {
-    await ready;
-    const students = await db.getStudents();
-    const reminders = await db.getReminders();
-    const expenses = await db.getExpenses();
-    return { students, reminders, expenses };
-  },
-
-  // Saves a full point-in-time copy into the backups table. Cheap: this app's
-  // entire dataset (a few hundred students at most) is tiny by database standards.
-  async snapshot(reason) {
-    await ready;
-    const data = await db.exportAll();
-    await pool.query("INSERT INTO backups (reason, student_count, data) VALUES ($1, $2, $3)", [
-      reason,
-      data.students.length,
-      JSON.stringify(data),
-    ]);
-    // Keep only the most recent 60 snapshots so this table can't grow unbounded.
-    await pool.query(`
-      DELETE FROM backups WHERE id NOT IN (SELECT id FROM backups ORDER BY taken_at DESC LIMIT 60)
-    `);
-  },
-
-  // Called opportunistically on normal page-load traffic — takes one automatic
-  // snapshot per calendar day without needing a separate cron service.
-  async ensureDailySnapshot() {
-    await ready;
-    const { rows } = await pool.query(
-      "SELECT 1 FROM backups WHERE reason = 'daily' AND taken_at::date = now()::date LIMIT 1"
-    );
-    if (rows.length === 0) await db.snapshot("daily");
-  },
-
-  // Called opportunistically on normal page-load traffic, same pattern as
-  // ensureDailySnapshot above — no separate cron needed. Any student whose
-  // session_year is behind the CURRENT academic year (computed from the server's
-  // clock, crossing over every April 1) gets rolled over automatically: whatever
-  // they still owed gets added to previous_session_due (additive, in case the app
-  // wasn't opened for more than one rollover in a row — unlikely, but this stays
-  // correct either way), and total/paid/installments/payments reset to a blank
-  // slate for the new session, ready for that year's fee to be entered/imported.
-  // A one-line note is appended to history so the reset is visible in the audit
-  // trail rather than looking like the balance just vanished.
-  async ensureSessionRollover() {
-    await ready;
-    const year = currentAcademicYearStart();
-    const { rows } = await pool.query("SELECT id FROM students WHERE session_year < $1", [year]);
-    if (rows.length === 0) return;
-    for (const { id } of rows) {
-      const client = await pool.connect();
-      try {
-        await client.query("BEGIN");
-        const { rows: locked } = await client.query("SELECT * FROM students WHERE id = $1 FOR UPDATE", [id]);
-        const s = locked[0];
-        if (!s || Number(s.session_year) >= year) {
-          // Already rolled over by a concurrent request, or somehow caught up — skip.
-          await client.query("COMMIT");
-          client.release();
-          continue;
-        }
-        const leftover = Math.max(0, Number(s.total) - Number(s.paid));
-        const newPreviousDue = Number(s.previous_session_due || 0) + leftover;
-        const history = [
-          ...(s.history || []),
-          {
-            field: "session_rollover",
-            oldValue: `Session ${s.session_year}: ${s.total} total, ${s.paid} paid`,
-            newValue: leftover > 0 ? `₹${leftover} carried to previous session dues` : "No balance carried over",
-            by: "system",
-            at: new Date().toISOString(),
-          },
-        ];
-        await client.query(
-          `UPDATE students SET session_year = $1, previous_session_due = $2, total = 0, paid = 0,
-           installments = '[]', payments = '[]', history = $3 WHERE id = $4`,
-          [year, newPreviousDue, JSON.stringify(history), id]
-        );
-        await client.query("COMMIT");
-      } catch (err) {
-        await safeRollback(client);
-        throw err;
-      } finally {
-        client.release();
-      }
-    }
-  },
-
-  async listSnapshots() {
-    await ready;
-    const { rows } = await pool.query(
-      "SELECT id, taken_at, reason, student_count FROM backups ORDER BY taken_at DESC"
-    );
-    return rows;
-  },
-
-  async getSnapshot(id) {
-    await ready;
-    const { rows } = await pool.query("SELECT * FROM backups WHERE id = $1", [id]);
-    return rows[0] ? rows[0].data : null;
-  },
-
-  async importAll({ students, reminders, expenses = [] }) {
-    await ready;
-    // Always snapshot the CURRENT state right before overwriting it, regardless of
-    // whether the incoming data turns out to be good — this is the undo button for
-    // "someone restored the wrong file by mistake".
-    await db.snapshot("pre-restore");
-    const client = await pool.connect();
-    try {
-      await client.query("BEGIN");
-      await client.query("DELETE FROM students");
-      await client.query("DELETE FROM reminders");
-      await client.query("DELETE FROM expenses");
-      for (const s of students) {
-        await client.query(
-          `INSERT INTO students (id, name, cls, school, phone, father_name, total, paid, due, plan_type, frequency, installment_amount, installments, payments, history, transport_rate, transport_months, transport_paid, transport_payments, session_year, previous_session_due, previous_session_payments)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`,
-          [
-            s.id, s.name, s.cls, s.school, s.phone || "", s.fatherName || "", s.total, s.paid || 0, s.due,
-            s.planType || "full", s.frequency || null, s.installmentAmount ?? null,
-            JSON.stringify(s.installments || []), JSON.stringify(s.payments || []), JSON.stringify(s.history || []),
-            s.transportRate || 0, JSON.stringify(s.transportMonths || []), s.transportPaid || 0, JSON.stringify(s.transportPayments || []),
-            s.sessionYear ?? currentAcademicYearStart(), s.previousSessionDue || 0, JSON.stringify(s.previousSessionPayments || []),
-          ]
-        );
-      }
-      for (const r of reminders) {
-        await client.query(
-          `INSERT INTO reminders (id, student_id, name, school, phone, balance, message, sent_at, sent_by)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-          [r.id, r.studentId, r.name, r.school, r.phone, r.balance ?? null, r.message, r.sentAt, r.sentBy]
-        );
-      }
-      for (const e of expenses) {
-        await client.query(
-          `INSERT INTO expenses (id, school, category, description, vendor, amount, date, history)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-          [e.id, e.school, e.category || "Miscellaneous", e.description || "", e.vendor || "", Number(e.amount) || 0, e.date, JSON.stringify(e.history || [])]
-        );
-      }
-      await client.query("COMMIT");
-    } catch (err) {
-      await client.query("ROLLBACK");
-      throw err;
-    } finally {
-      client.release();
-    }
-  },
-};
+  // destructive-reset pattern as the tuition "Regenerate schedule
