@@ -165,6 +165,7 @@ function assertSchoolAllowed(req, res, school) {
 
 app.get("/api/students", requireAuth, h(async (req, res) => {
   db.ensureDailySnapshot().catch((err) => console.error("Daily snapshot failed:", err.message)); // fire-and-forget, never blocks the response
+  await db.ensureSessionRollover(); // awaited — unlike the snapshot above, students returned below must already reflect this
   const all = await db.getStudents();
   const schools = req.user.schools;
   res.json(schools ? all.filter((s) => schools.includes(s.school)) : all);
@@ -224,7 +225,7 @@ app.post("/api/students/bulk-import", requireAuth, requireAdmin, h(async (req, r
 }));
 
 // Fields worth tracking in the audit trail. Noisy/bulky fields (installments, payments) are excluded.
-const AUDIT_FIELDS = ["name", "cls", "school", "phone", "fatherName", "total", "paid", "due", "planType", "frequency", "installmentAmount", "transportRate"];
+const AUDIT_FIELDS = ["name", "cls", "school", "phone", "fatherName", "total", "paid", "due", "planType", "frequency", "installmentAmount", "transportRate", "previousSessionDue"];
 
 app.put("/api/students/:id", requireAuth, requireAdmin, h(async (req, res) => {
   const all = await db.getStudents();
@@ -260,6 +261,22 @@ app.post("/api/students/:id/payments", requireAuth, h(async (req, res) => {
   if (!amount || amount <= 0) return res.status(400).json({ error: "amount must be a positive number" });
   const method = req.body.method === "upi_bank" ? "upi_bank" : "cash";
   const updated = await db.addPayment(req.params.id, amount, method, req.user.name || req.user.email);
+  if (!updated) return res.status(404).json({ error: "Student not found" });
+  res.json(updated);
+}));
+
+// Previous-session dues are a separate ledger from the current session (see
+// ensureSessionRollover in db.js) — same not-admin-gated treatment as fee/transport
+// payments, since recording one is a routine counter action.
+app.post("/api/students/:id/previous-session/payments", requireAuth, h(async (req, res) => {
+  const all = await db.getStudents();
+  const existing = all.find((s) => s.id === req.params.id);
+  if (!existing) return res.status(404).json({ error: "Student not found" });
+  if (!assertSchoolAllowed(req, res, existing.school)) return;
+  const amount = Number(req.body.amount);
+  if (!amount || amount <= 0) return res.status(400).json({ error: "amount must be a positive number" });
+  const method = req.body.method === "upi_bank" ? "upi_bank" : "cash";
+  const updated = await db.addPreviousSessionPayment(req.params.id, amount, method, req.user.name || req.user.email);
   if (!updated) return res.status(404).json({ error: "Student not found" });
   res.json(updated);
 }));
