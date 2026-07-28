@@ -1003,6 +1003,11 @@ function FeeLedger({ user, onLogout }) {
     if (!newExpense.school || !newExpense.amount || !newExpense.date) {
       return setToast({ kind: "warn", text: "School, amount, and date are required." });
     }
+    // Expenses represent money already spent — a future date doesn't mean anything
+    // for this kind of record (unlike a fee due date, which is meant to be ahead).
+    if (newExpense.date > todayISO()) {
+      return setToast({ kind: "warn", text: "Expense date can't be in the future." });
+    }
     const payload = {
       school: newExpense.school,
       category: newExpense.category.trim() || "Miscellaneous",
@@ -1712,7 +1717,9 @@ function FeeLedger({ user, onLogout }) {
                   </div>
                 </div>
               )}
-              {filteredExpenses.map((e) => (
+              {filteredExpenses.map((e) => {
+                const createdEntry = (e.history || []).find((h) => h.field === "created");
+                return (
                 <div className="row" key={e.id} style={{ gridTemplateColumns: "36px 1fr auto" }}>
                   <div className="avatar" style={{ background: "var(--accent-tint)", color: "var(--accent)" }}>{initials(e.category)}</div>
                   <div>
@@ -1720,6 +1727,11 @@ function FeeLedger({ user, onLogout }) {
                     <div className="row-sub">
                       {e.description || "—"}{e.vendor && ` · ${e.vendor}`} · {e.school} · {e.date}
                     </div>
+                    {createdEntry && (
+                      <div style={{ fontSize: 11, color: "var(--text-mute)", marginTop: 2 }}>
+                        Added by {createdEntry.by || "—"} · {new Date(createdEntry.at).toLocaleString()}
+                      </div>
+                    )}
                   </div>
                   <div className="row-right">
                     <div className="amounts clickable" onClick={() => setHistoryExpense(e)}>
@@ -1735,7 +1747,8 @@ function FeeLedger({ user, onLogout }) {
                     </div>
                   </div>
                 </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         </>
@@ -1807,7 +1820,7 @@ function FeeLedger({ user, onLogout }) {
             <div className="field"><label>Description</label><input value={newExpense.description} onChange={(e) => setNewExpense({ ...newExpense, description: e.target.value })} placeholder="What was this for?" /></div>
             <div className="field-row">
               <div className="field"><label>Paid to (optional)</label><input value={newExpense.vendor} onChange={(e) => setNewExpense({ ...newExpense, vendor: e.target.value })} placeholder="Vendor / person" /></div>
-              <div className="field"><label>Date</label><input type="date" value={newExpense.date} onChange={(e) => setNewExpense({ ...newExpense, date: e.target.value })} /></div>
+              <div className="field"><label>Date</label><input type="date" max={todayISO()} value={newExpense.date} onChange={(e) => setNewExpense({ ...newExpense, date: e.target.value })} /></div>
             </div>
             <button className="btn btn-primary" style={{ width: "100%", justifyContent: "center", opacity: savingExpense ? 0.6 : 1 }} disabled={savingExpense} onClick={saveExpense}>{savingExpense ? "Saving…" : editingExpenseId ? "Save changes" : "Add expense"}</button>
           </div>
