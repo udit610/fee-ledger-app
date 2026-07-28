@@ -190,7 +190,7 @@ app.post("/api/students", requireAuth, requireAdmin, h(async (req, res) => {
     installmentAmount: installmentAmount != null ? Number(installmentAmount) : undefined,
     installments: Array.isArray(installments) ? installments : undefined,
     payments: Number(paid) > 0 ? [{ amount: Number(paid), date: new Date().toISOString() }] : [],
-    history: [{ field: "created", oldValue: null, newValue: null, by: req.user.email, at: new Date().toISOString() }],
+    history: [{ field: "created", oldValue: null, newValue: null, by: req.user.name || req.user.email, at: new Date().toISOString() }],
     transportRate: Number(transportRate) || 0,
   };
   res.status(201).json(await db.addStudent(student));
@@ -219,7 +219,7 @@ app.post("/api/students/bulk-import", requireAuth, requireAdmin, h(async (req, r
       installmentAmount: r.installmentAmount != null ? Number(r.installmentAmount) : undefined,
       installments: Array.isArray(r.installments) ? r.installments : undefined,
       payments: Number(r.paid) > 0 ? [{ amount: Number(r.paid), date: new Date().toISOString() }] : [],
-      history: [{ field: "created", oldValue: null, newValue: null, by: req.user.email, at: new Date().toISOString(), note: "Excel import" }],
+      history: [{ field: "created", oldValue: null, newValue: null, by: req.user.name || req.user.email, at: new Date().toISOString(), note: "Excel import" }],
     }));
   res.status(201).json(await db.bulkAddStudents(prepared));
 }));
@@ -246,7 +246,7 @@ app.put("/api/students/:id", requireAuth, requireAdmin, h(async (req, res) => {
   const now = new Date().toISOString();
   AUDIT_FIELDS.forEach((field) => {
     if (field in patch && String(patch[field]) !== String(existing[field])) {
-      changes.push({ field, oldValue: existing[field] ?? null, newValue: patch[field], by: req.user.email, at: now });
+      changes.push({ field, oldValue: existing[field] ?? null, newValue: patch[field], by: req.user.name || req.user.email, at: now });
     }
   });
   if (changes.length) patch.history = [...(existing.history || []), ...changes];
@@ -418,7 +418,7 @@ app.post("/api/expenses", requireAuth, h(async (req, res) => {
     id: "e" + Date.now() + Math.random().toString(36).slice(2, 7),
     school, category: category || "Miscellaneous", description: description || "", vendor: vendor || "",
     amount: Number(amount), date,
-    history: [{ field: "created", oldValue: null, newValue: null, by: req.user.email, at: new Date().toISOString() }],
+    history: [{ field: "created", oldValue: null, newValue: null, by: req.user.name || req.user.email, at: new Date().toISOString() }],
   };
   res.status(201).json(await db.addExpense(expense));
 }));
@@ -438,7 +438,7 @@ app.put("/api/expenses/:id", requireAuth, requireAdmin, h(async (req, res) => {
   const now = new Date().toISOString();
   EXPENSE_AUDIT_FIELDS.forEach((field) => {
     if (field in patch && String(patch[field]) !== String(existing[field])) {
-      changes.push({ field, oldValue: existing[field] ?? null, newValue: patch[field], by: req.user.email, at: now });
+      changes.push({ field, oldValue: existing[field] ?? null, newValue: patch[field], by: req.user.name || req.user.email, at: now });
     }
   });
   if (changes.length) patch.history = [...(existing.history || []), ...changes];
