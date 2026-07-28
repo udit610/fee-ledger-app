@@ -1,0 +1,2398 @@
+import React, { useState, useEffect, useMemo, useRef } from "react";
+import { Search, Plus, MessageCircle, X, Check, Clock, AlertTriangle, IndianRupee, Send, History, Trash2, Upload, Download, FileSpreadsheet, AlertCircle, Pencil, LogOut, ChevronDown, BarChart3, DatabaseBackup, Sun, Moon, Bus } from "lucide-react";
+import * as XLSX from "xlsx";
+import { api } from "./api.js";
+
+const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID;
+const SCHOOLS = ["Vardhman Convent School", "Blossom Heights Pre-School"];
+const EXPENSE_CATEGORIES = ["Salaries", "Rent", "Utilities", "Maintenance", "Supplies", "Transport", "Food & Catering", "Marketing", "Miscellaneous"];
+// Father's Name and Transport Rate deliberately sit at the END of this list, not
+// mixed in with the original columns. They were added after the original template
+// was already in use — putting them at the end means old spreadsheets (or habits)
+// built around the original column order paste in cleanly with these two just left
+// blank, instead of silently shifting Total Fee/Due Date etc. into the wrong columns.
+const TEMPLATE_HEADERS = ["Name", "Class", "School", "Parent Phone", "Total Fee", "Paid", "Due Date", "Quarterly Amount", "Biannual Amount", "Monthly Amount", "Father's Name", "Transport Rate"];
+
+// Installment plan configs, keyed by frequency
+const FREQ_CONFIG = {
+  monthly: { count: 12, monthsApart: 1, label: "Month" },
+  quarterly: { count: 4, monthsApart: 3, label: "Quarter" },
+  biannual: { count: 2, monthsApart: 6, label: "Half" },
+};
+
+// The school's academic year runs April to March, not the calendar year. Quarterly
+// lands on April/July/October/January, biannual on April/October, and monthly
+// always counts April through March — regardless of which month the "Due" date
+// typed (or imported from a spreadsheet) happens to fall in. Without this, two
+// students entered with due dates in different months would get monthly
+// schedules starting in different months too, instead of both running April→March.
+const ACADEMIC_MONTHS = {
+  quarterly: [4, 7, 10, 1],
+  biannual: [4, 10],
+  monthly: [4, 5, 6, 7, 8, 9, 10, 11, 12, 1, 2, 3],
+};
+
+function isInstallmentPlan(s) {
+  return s.planType === "monthly" || s.planType === "quarterly";
+}
+
+function planLabel(s) {
+  if (s.planType === "monthly") return "Monthly · 12";
+  if (s.planType === "quarterly") return s.frequency === "biannual" ? "Biannual · 2" : "Quarterly · 4";
+  return "One-time";
+}
+
+// UI-only combined selector <-> {planType, frequency} mapping
+const PLAN_SELECT_OPTIONS = [
+  { value: "full", label: "One-time", planType: "full", frequency: null },
+  { value: "monthly", label: "Monthly (12)", planType: "monthly", frequency: "monthly" },
+  { value: "quarterly-quarterly", label: "Quarterly (4)", planType: "quarterly", frequency: "quarterly" },
+  { value: "quarterly-biannual", label: "Biannual (2)", planType: "quarterly", frequency: "biannual" },
+];
+
+function planSelectValue(planType, frequency) {
+  if (planType === "monthly") return "monthly";
+  if (planType === "quarterly" && frequency === "biannual") return "quarterly-biannual";
+  if (planType === "quarterly") return "quarterly-quarterly";
+  return "full";
+}
+
+const FONT_IMPORT = `@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@500;600&family=Inter:wght@400;500;600;700;800&display=swap');`;
+
+const money = (n) => "₹" + Number(n || 0).toLocaleString("en-IN");
+
+// Every on-screen date uses this one format, DD/Month/YYYY (e.g. "27/July/2026") —
+// previously some spots showed raw "2026-07-27" (ISO) and others showed
+// browser-locale "7/28/2026", which read as inconsistent side by side.
+// For DATE-ONLY strings ("2026-07-27") — due dates, expense dates, etc.
+function formatDate(dateStr) {
+  if (!dateStr) return "—";
+  const d = new Date(dateStr + "T00:00:00"); // parsed as local time, not UTC — avoids the day-off-by-one bug fixed elsewhere in this file
+  if (isNaN(d)) return String(dateStr);
+  const day = String(d.getDate()).padStart(2, "0");
+  const month = d.toLocaleDateString("en-US", { month: "long" });
+  return `${day}/${month}/${d.getFullYear()}`;
+}
+// For full TIMESTAMPS (already-precise ISO instants, e.g. new Date().toISOString())
+// — payment logs, "added by", audit history, reminders, backups.
+function formatDateTime(dateTimeStr) {
+  if (!dateTimeStr) return "—";
+  const d = new Date(dateTimeStr);
+  if (isNaN(d)) return String(dateTimeStr);
+  const day = String(d.getDate()).padStart(2, "0");
+  const month = d.toLocaleDateString("en-US", { month: "long" });
+  const time = d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true });
+  return `${day}/${month}/${d.getFullYear()}, ${time}`;
+}
+const todayISO = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
+const daysBetween = (a, b) => Math.round((new Date(a) - new Date(b)) / 86400000);
+
+function statusOf(student, today = todayISO()) {
+  const balance = student.total - student.paid;
+  if (balance <= 0) {
+    // A cleared current-session balance doesn't mean "Paid" if there's still money
+    // owed from before the rollover — that's always overdue by definition (its due
+    // date was necessarily in a past session).
+    return student.previousSessionDue > 0 ? "overdue" : "paid";
+  }
+  return daysBetween(student.due, today) < 0 ? "overdue" : "pending";
+}
+
+function addMonths(dateStr, n) {
+  const d = new Date(dateStr + "T00:00:00");
+  const day = d.getDate();
+  // Do the month/year carry with plain integer math and build the string
+  // ourselves — never round-trip through toISOString(). That method reads the
+  // date back out in UTC, while it was parsed in local time above, so for
+  // anyone in a timezone ahead of UTC (e.g. India, UTC+5:30) every date this
+  // touched quietly shifted back by a day (this is exactly what made a Monthly
+  // plan's "first" installment show up as the previous month).
+  let targetMonth = d.getMonth() + n;
+  let targetYear = d.getFullYear() + Math.floor(targetMonth / 12);
+  targetMonth = ((targetMonth % 12) + 12) % 12;
+  const daysInTargetMonth = new Date(targetYear, targetMonth + 1, 0).getDate();
+  const clampedDay = Math.min(day, daysInTargetMonth); // guard against month-length overflow (e.g. Jan 31 + 1mo)
+  return `${targetYear}-${String(targetMonth + 1).padStart(2, "0")}-${String(clampedDay).padStart(2, "0")}`;
+}
+
+// Snaps a due date onto the school's fixed academic-year calendar (April–March),
+// keeping the day-of-month the plan was set up with. `monthNum` is 1-12 (e.g. 4 =
+// April). Given any startDue, figures out which academic year it falls in (April
+// of year Y through March of year Y+1), then returns that year's occurrence of
+// monthNum — April/July/October land in year Y, January lands in year Y+1.
+function academicYearAnchorDue(startDue, monthNum) {
+  const d = new Date(startDue + "T00:00:00");
+  const day = d.getDate();
+  const startMonth = d.getMonth() + 1;
+  const academicYearStart = startMonth >= 4 ? d.getFullYear() : d.getFullYear() - 1;
+  const targetYear = monthNum < 4 ? academicYearStart + 1 : academicYearStart;
+  const daysInTargetMonth = new Date(targetYear, monthNum, 0).getDate();
+  const mm = String(monthNum).padStart(2, "0");
+  const dd = String(Math.min(day, daysInTargetMonth)).padStart(2, "0");
+  return `${targetYear}-${mm}-${dd}`;
+}
+
+// "2026-06-18" -> "June 2026". Used to label installments by actual calendar
+// month/year (derived from each installment's due date) instead of a generic
+// "Month 1" / "Month 2" counter.
+function monthYearLabel(dateStr) {
+  const d = new Date(dateStr + "T00:00:00");
+  return d.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+}
+
+// Pure function: builds an installment schedule. frequency drives count/spacing.
+// Quarterly/biannual snap onto fixed academic-year terms; monthly stays purely
+// sequential from startDue (there's no fixed-term concept for a monthly cadence).
+function generateInstallments(planType, frequency, startDue, amount) {
+  const cfg = FREQ_CONFIG[frequency] || FREQ_CONFIG.monthly;
+  const academicMonths = ACADEMIC_MONTHS[frequency];
+  const amt = Number(amount) || 0;
+  return Array.from({ length: cfg.count }, (_, i) => {
+    const due = academicMonths ? academicYearAnchorDue(startDue, academicMonths[i]) : addMonths(startDue, i * cfg.monthsApart);
+    // Monthly installments are just labeled by their calendar month ("June 2026").
+    // Quarterly/biannual keep their period number too, since one calendar month
+    // alone doesn't convey "this is installment 2 of 4".
+    const period = cfg === FREQ_CONFIG.monthly ? monthYearLabel(due) : `${cfg.label} ${i + 1} · ${monthYearLabel(due)}`;
+    return { period, due, amount: amt, paid: false, paidDate: null };
+  });
+}
+
+// Marks installments paid sequentially (in order) until paidTotal is exhausted.
+// Used on Excel import, where we only know a lump "Paid" total, not which periods.
+function markInstallmentsFromPaidTotal(installments, paidTotal) {
+  let remaining = Number(paidTotal) || 0;
+  return installments.map((inst) => {
+    if (remaining >= inst.amount && inst.amount > 0) {
+      remaining -= inst.amount;
+      return { ...inst, paid: true, paidDate: new Date().toISOString() };
+    }
+    return inst;
+  });
+}
+
+// Derives total/paid/due for installment-plan students from their installments array.
+// Full-plan students pass through unchanged (their total/paid/due are already authoritative).
+function withComputed(student) {
+  if (!isInstallmentPlan(student)) return student;
+  const installments = student.installments || [];
+  const total = installments.reduce((a, i) => a + Number(i.amount || 0), 0);
+  const paid = installments.filter((i) => i.paid).reduce((a, i) => a + Number(i.amount || 0), 0);
+  const nextUnpaid = installments.find((i) => !i.paid);
+  const due = nextUnpaid ? nextUnpaid.due : (installments[installments.length - 1]?.due || student.due);
+  return { ...student, total, paid, due };
+}
+
+function monthKey(iso) {
+  return String(iso || "").slice(0, 7); // "YYYY-MM"
+}
+function monthLabel(key) {
+  const [y, m] = key.split("-").map(Number);
+  return new Date(y, m - 1, 1).toLocaleDateString("en-IN", { month: "short", year: "2-digit" });
+}
+
+// The 11 chargeable transport months for the CURRENT academic year (April–March,
+// skipping June — no charge during summer vacation). Recomputed from today's date,
+// so it automatically rolls over to next year's April once the new academic year starts.
+function currentAcademicYearTransportMonths() {
+  const now = new Date();
+  const academicYearStart = now.getMonth() + 1 >= 4 ? now.getFullYear() : now.getFullYear() - 1;
+  const months = [];
+  for (let m = 4; m <= 12; m++) {
+    if (m !== 6) months.push(`${academicYearStart}-${String(m).padStart(2, "0")}`);
+  }
+  for (let m = 1; m <= 3; m++) months.push(`${academicYearStart + 1}-${String(m).padStart(2, "0")}`);
+  return months; // Apr, May, Jul, Aug, Sep, Oct, Nov, Dec, Jan, Feb, Mar
+}
+
+// Transport is a separate, opt-in-per-month balance — entirely independent of the
+// student's tuition total/paid (see backend db.js). Total is dynamic: rate × however
+// many months they're currently opted into, so it grows/shrinks as months are toggled.
+function transportComputed(student) {
+  const months = student.transportMonths || [];
+  const total = months.length * (student.transportRate || 0);
+  const paid = student.transportPaid || 0;
+  return { total, paid, balance: total - paid };
+}
+
+// Annual Fee is a single once-per-academic-year charge — unlike transport there's
+// no per-month opt-in list, just a flat amount that's either paid or outstanding.
+function annualFeeComputed(student) {
+  const total = student.annualFeeAmount || 0;
+  const paid = student.annualFeePaid || 0;
+  return { total, paid, balance: Math.max(0, total - paid) };
+}
+
+// Sum of installments that have actually come due (due date <= today) and remain
+// unpaid — i.e. every overdue/current month, but NOT future installments that
+// simply haven't arrived yet. This is what "cumulative overdue" means for an
+// installment-plan student.
+function accruedInstallmentBalance(student, today = todayISO()) {
+  return (student.installments || [])
+    .filter((i) => !i.paid && i.due <= today)
+    .reduce((a, i) => a + Number(i.amount || 0), 0);
+}
+
+// The single source of truth for "how much does this parent owe right now,
+// across everything" — tuition (accrued-to-date for installment plans, full
+// balance for full-plan students), transport, Annual Fee, and any carried-over
+// previous-session due, net of whatever's already been paid against each.
+function computeTotalPending(student) {
+  const tuitionPending = isInstallmentPlan(student) && (student.installments || []).length
+    ? accruedInstallmentBalance(student)
+    : Math.max(0, student.total - student.paid);
+  const transportPending = student.transportRate > 0 ? transportComputed(student).balance : 0;
+  const annualFeePending = annualFeeComputed(student).balance;
+  const previousPending = student.previousSessionDue || 0;
+  return tuitionPending + transportPending + annualFeePending + previousPending;
+}
+
+// Builds a "collected per month" series for the last `months` months from every
+// student's payments log (each payment already carries a real date).
+function collectionSeries(students, months = 6) {
+  const now = new Date();
+  const keys = Array.from({ length: months }, (_, i) => {
+    const d = new Date(now.getFullYear(), now.getMonth() - (months - 1 - i), 1);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  });
+  const totals = Object.fromEntries(keys.map((k) => [k, 0]));
+  students.forEach((s) => {
+    (s.payments || []).forEach((p) => {
+      const k = monthKey(p.date);
+      if (k in totals) totals[k] += Number(p.amount || 0);
+    });
+  });
+  return keys.map((k) => ({ key: k, label: monthLabel(k), amount: totals[k] }));
+}
+
+function normName(s) {
+  return String(s || "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+// Flags an import row as a likely duplicate of an existing student (same name+class+school
+// AND, when both records have one on file, the same father's name too — this is what keeps
+// two genuinely different kids with an identical name/class/school, e.g. twins, from being
+// merged into one record during import).
+function findDuplicate(row, existingStudents) {
+  return existingStudents.find((s) => {
+    if (normName(s.name) !== normName(row.name) || normName(s.cls) !== normName(row.cls) || s.school !== row.school) return false;
+    if (s.fatherName && row.fatherName) return normName(s.fatherName) === normName(row.fatherName);
+    return true; // no father's name on file for one or both — fall back to name+class+school only
+  });
+}
+
+// A student "needs a reminder" if they have a balance due within the next 3 days (or overdue)
+// and haven't had one logged in the last 7 days, so the digest doesn't nag about someone just reminded.
+function needsReminder(s, reminders) {
+  if (s.status === "paid") return false;
+  const daysUntilDue = daysBetween(s.due, todayISO());
+  if (daysUntilDue > 3) return false;
+  const recentlyReminded = reminders.some((r) => r.studentId === s.id && daysBetween(todayISO(), r.sentAt) <= 7);
+  return !recentlyReminded;
+}
+
+const STATUS_META = {
+  paid: { label: "Paid", color: "var(--paid)", bg: "var(--paid-bg)", icon: Check },
+  pending: { label: "Due", color: "var(--due)", bg: "var(--due-bg)", icon: Clock },
+  overdue: { label: "Overdue", color: "var(--over)", bg: "var(--over-bg)", icon: AlertTriangle },
+};
+
+// The stamp itself reads like actual ink on paper: Paid is a solid lime block
+// (dark, always-legible ink text/border regardless of theme), Due/Overdue are
+// outlined in their own color with a transparent fill, like a rubber-stamp mark.
+const STAMP_META = {
+  paid: { label: "Paid", color: "var(--highlight-ink)", border: "var(--ink)", bg: "var(--highlight)", icon: Check },
+  pending: { label: "Due", color: "var(--due)", border: "var(--due)", bg: "transparent", icon: Clock },
+  overdue: { label: "Overdue", color: "var(--over)", border: "var(--over)", bg: "transparent", icon: AlertTriangle },
+};
+
+function StampBadge({ status }) {
+  const meta = STAMP_META[status];
+  const Icon = meta.icon;
+  return (
+    <span className="stamp" style={{ color: meta.color, borderColor: meta.border, background: meta.bg }}>
+      <Icon size={11} strokeWidth={2.5} />
+      {meta.label}
+    </span>
+  );
+}
+
+// Reminder now states the parent's CUMULATIVE outstanding balance as of today —
+// every overdue/current installment, transport, Annual Fee, and any previous-session
+// due, all rolled into one figure — instead of just the single next-due period.
+function defaultTemplate(student) {
+  const totalPending = computeTotalPending(student);
+  const asOf = monthYearLabel(todayISO());
+  return `Dear Parent, this is an automated reminder from ${student.school} that the total pending fee for ${student.name} (${student.cls}) up to date is ${money(totalPending)} (including overdue dues up to ${asOf}). Kindly pay at the earliest to avoid late charges. Thank you.`;
+}
+
+function initials(name) {
+  return String(name || "")
+    .trim()
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((w) => w[0]?.toUpperCase())
+    .join("");
+}
+
+function waLink(phone, message) {
+  let d = String(phone || "").replace(/\D/g, "");
+  if (d.length === 10) d = "91" + d;
+  return `https://wa.me/${d}?text=${encodeURIComponent(message)}`;
+}
+
+function exportLedger(students) {
+  const rows = students.map((raw) => {
+    const s = withComputed(raw);
+    const t = s.transportRate > 0 ? transportComputed(s) : null;
+    const af = annualFeeComputed(s);
+    return {
+      Name: s.name, Class: s.cls, School: s.school, "Parent Phone": s.phone, "Father's Name": s.fatherName || "",
+      Plan: planLabel(s),
+      "Total Fee": s.total, Paid: s.paid, Balance: s.total - s.paid, "Due Date": s.due, Status: statusOf(s),
+      "Transport Rate": s.transportRate || "", "Transport Paid": t ? t.paid : "", "Transport Due": t ? t.balance : "",
+      "Annual Fee": af.total || "", "Annual Fee Paid": af.total ? af.paid : "", "Annual Fee Due": af.total ? af.balance : "",
+      "Total Pending (All Fees)": computeTotalPending(s),
+    };
+  });
+  const ws = XLSX.utils.json_to_sheet(rows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Fee Ledger");
+  XLSX.writeFile(wb, `fee-ledger-export-${todayISO()}.xlsx`);
+}
+
+function downloadTemplate() {
+  const sample = [
+    TEMPLATE_HEADERS,
+    ["Aarav Sharma", "Grade 4", "Vardhman Convent School", "9876500011", 18000, 18000, "2026-06-10", "", "", "", "", ""],
+    ["Ira Mehta", "Nursery", "Blossom Heights Pre-School", "9876500044", 9000, 0, "2026-07-01", "", "", "", "", 600],
+    ["Vihaan Kapoor", "Grade 2", "Vardhman Convent School", "9876500022", "", 0, "2026-06-10", "", "", 1500, "", ""],
+    ["Myra Chopra", "Prep", "Blossom Heights Pre-School", "9876500033", "", 0, "2026-06-01", 4500, "", "", "", ""],
+    ["Kabir Rao", "Grade 6", "Vardhman Convent School", "9876500055", "", 0, "2026-04-15", "", 9000, "", "Ramesh Rao", ""],
+  ];
+  const ws = XLSX.utils.aoa_to_sheet(sample);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Fee Ledger");
+  XLSX.writeFile(wb, "fee-ledger-template.xlsx");
+}
+
+function excelDateToISO(value) {
+  if (value == null || value === "") return "";
+  if (typeof value === "number") {
+    const d = XLSX.SSF.parse_date_code(value);
+    if (!d) return "";
+    return `${d.y}-${String(d.m).padStart(2, "0")}-${String(d.d).padStart(2, "0")}`;
+  }
+  const parsed = new Date(value);
+  if (isNaN(parsed)) return String(value);
+  return `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, "0")}-${String(parsed.getDate()).padStart(2, "0")}`;
+}
+
+function normalizeKey(k) {
+  return String(k || "").trim().toLowerCase().replace(/[^a-z]/g, "");
+}
+
+function parseWorkbook(arrayBuffer) {
+  const wb = XLSX.read(arrayBuffer, { type: "array" });
+  const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: "" });
+  return rows.map((row, i) => {
+    const map = {};
+    Object.keys(row).forEach((k) => (map[normalizeKey(k)] = row[k]));
+    const name = String(map["name"] || map["studentname"] || "").trim();
+    const cls = String(map["class"] || map["grade"] || "").trim();
+    const school = String(map["school"] || "").trim();
+    const phone = String(map["parentphone"] || map["phone"] || map["whatsapp"] || "").trim();
+    const fatherName = String(map["fathersname"] || map["fathername"] || map["guardianname"] || "").trim();
+    const transportRate = Number(map["transportrate"] || map["transportfee"] || map["transportmonthly"] || 0);
+    const paid = Number(map["paid"] || 0);
+    const due = excelDateToISO(map["duedate"] || map["due"]);
+    const monthlyAmount = Number(map["monthlyamount"] || 0);
+    const quarterlyAmount = Number(map["quarterlyamount"] || 0);
+    const biannualAmount = Number(map["biannualamount"] || map["halfyearlyamount"] || map["semiannualamount"] || 0);
+
+    let planType = "full";
+    let frequency = null;
+    let installmentAmount = 0;
+    if (monthlyAmount > 0) {
+      planType = "monthly";
+      frequency = "monthly";
+      installmentAmount = monthlyAmount;
+    } else if (quarterlyAmount > 0) {
+      planType = "quarterly";
+      frequency = "quarterly";
+      installmentAmount = quarterlyAmount;
+    } else if (biannualAmount > 0) {
+      planType = "quarterly"; // "quarterly" is the internal planType for both Quarterly and Biannual — frequency is what distinguishes them
+      frequency = "biannual";
+      installmentAmount = biannualAmount;
+    }
+    // "Annual Amount" is just another name for a one-time full payment — same thing
+    // "Total Fee" already means, so it's accepted as an alias rather than needing
+    // its own separate plan type.
+    const total = planType === "full" ? Number(map["totalfee"] || map["total"] || map["annualamount"] || 0) : installmentAmount * FREQ_CONFIG[frequency].count;
+
+    const errors = [];
+    if (!name) errors.push("Missing name");
+    if (!total || total <= 0) errors.push("Missing/invalid total fee (or installment amount)");
+    if (!due) errors.push("Missing/invalid due date");
+    // Doesn't block the row — a monthly transport rate landing at or above the
+    // student's total fee is almost always a sign the Transport Rate and Total Fee
+    // columns got swapped/misaligned somewhere upstream, not a genuine value, so
+    // it's flagged for a human to check rather than silently importing it.
+    const suspiciousTransportRate = transportRate > 0 && total > 0 && transportRate >= total;
+    return {
+      rowNum: i + 2, id: "tmp" + i, name, cls: cls || "—", school: school || SCHOOLS[0], phone, fatherName, transportRate,
+      total, paid: paid || 0, due, planType, frequency, installmentAmount, errors, suspiciousTransportRate,
+    };
+  });
+}
+
+// ---------------- Google Sign-In gate ----------------
+
+function GoogleGate({ onLoggedIn, notice }) {
+  const btnRef = useRef(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!window.google || !GOOGLE_CLIENT_ID) return;
+    window.google.accounts.id.initialize({
+      client_id: GOOGLE_CLIENT_ID,
+      callback: async (resp) => {
+        try {
+          const { user } = await api.loginWithGoogle(resp.credential);
+          onLoggedIn(user);
+        } catch (err) {
+          setError(err.message || "Sign-in failed");
+        }
+      },
+    });
+    window.google.accounts.id.renderButton(btnRef.current, { theme: "filled_black", size: "large", shape: "pill" });
+  }, []);
+
+  return (
+    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, background: "#FAF8F2" }}>
+      <style>{`${FONT_IMPORT}`}</style>
+      <div style={{ background: "#fff", border: "1.5px solid #0B0B0C", padding: 32, width: "100%", maxWidth: 340, textAlign: "center", fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, sans-serif" }}>
+        <div style={{ position: "relative", width: 42, height: 42, borderRadius: 4, background: "#0B0B0C", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 18px", fontWeight: 700, fontSize: 14, letterSpacing: -0.2, fontFamily: "'Space Grotesk', sans-serif", overflow: "hidden" }}>
+          FL
+          <div style={{ position: "absolute", left: 0, right: 0, bottom: 0, height: 3, background: "#C6FF33" }} />
+        </div>
+        <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 20, fontWeight: 700, color: "#0B0B0C", marginBottom: 6, letterSpacing: -0.2 }}>Fee Ledger</div>
+        <p style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, color: "#8B8776", marginBottom: 24, lineHeight: 1.6 }}>Sign in with a Google account authorized for this ledger.</p>
+        <div ref={btnRef} style={{ display: "flex", justifyContent: "center" }} />
+        {!GOOGLE_CLIENT_ID && <p style={{ color: "#C4102A", fontSize: 12, marginTop: 14 }}>VITE_GOOGLE_CLIENT_ID is not set — see .env.example</p>}
+        {notice && <p style={{ color: "#8B8776", fontSize: 12.5, marginTop: 14 }}>{notice}</p>}
+        {error && <p style={{ color: "#C4102A", fontSize: 12.5, marginTop: 14 }}>{error}</p>}
+      </div>
+    </div>
+  );
+}
+
+// ---------------- Main app ----------------
+
+// Themed replacement for native <select> in toolbars: native <option> popups are
+// rendered by the OS and ignore the app's CSS (always shows up as a plain white/blue
+// list regardless of theme). This reuses the same dropdown-wrap/menu/item styling
+// already used for the "All Schools" selector, so it matches the rest of the UI in
+// both light and dark mode.
+function Dropdown({ value, options, onChange, triggerClassName }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    function onDocClick(e) {
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+    }
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, []);
+  const current = options.find((o) => o.value === value);
+  return (
+    <div className="dropdown-wrap" ref={ref}>
+      <button type="button" className={triggerClassName || "pill-select"} onClick={() => setOpen((o) => !o)}>
+        {current ? current.label : ""}
+      </button>
+      {open && (
+        <div className="dropdown-menu">
+          {options.map((o) => (
+            <button
+              key={o.value}
+              type="button"
+              className={`dropdown-item ${o.value === value ? "active" : ""}`}
+              onClick={() => { onChange(o.value); setOpen(false); }}
+            >
+              {o.label}
+              {o.value === value && <Check size={14} />}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function App() {
+  const [user, setUser] = useState(undefined); // undefined = checking, null = signed out
+  const [loggedOutReason, setLoggedOutReason] = useState("");
+
+  useEffect(() => {
+    api.me().then((r) => setUser(r.user)).catch(() => setUser(null));
+  }, []);
+
+  // Auto-logout after 5 minutes of no mouse/keyboard/touch/scroll activity — a
+  // shared front-desk computer left signed in is a real risk for a fee ledger.
+  useEffect(() => {
+    if (!user) return;
+    const TIMEOUT_MS = 5 * 60 * 1000;
+    let timer;
+    const doLogout = () => {
+      api.logout().finally(() => {
+        setLoggedOutReason("Signed out after 5 minutes of inactivity.");
+        setUser(null);
+      });
+    };
+    const resetTimer = () => {
+      clearTimeout(timer);
+      timer = setTimeout(doLogout, TIMEOUT_MS);
+    };
+    const events = ["mousemove", "mousedown", "keydown", "scroll", "touchstart"];
+    events.forEach((evt) => window.addEventListener(evt, resetTimer));
+    resetTimer();
+    return () => {
+      clearTimeout(timer);
+      events.forEach((evt) => window.removeEventListener(evt, resetTimer));
+    };
+  }, [user]);
+
+  if (user === undefined) return <div style={{ minHeight: "100vh", background: "#FAF8F2" }} />;
+  if (!user) return <GoogleGate onLoggedIn={(u) => { setLoggedOutReason(""); setUser(u); }} notice={loggedOutReason} />;
+  return <FeeLedger user={user} onLogout={() => { api.logout().finally(() => setUser(null)); }} />;
+}
+
+function FeeLedger({ user, onLogout }) {
+  const allowedSchools = user.schools && user.schools.length ? user.schools : SCHOOLS;
+  const isCollector = user.role === "collector"; // restricted account: can only record payments and log expenses
+  const [darkMode, setDarkMode] = useState(() => {
+    const saved = localStorage.getItem("fee-ledger-theme");
+    if (saved) return saved === "dark";
+    return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+  });
+  useEffect(() => {
+    localStorage.setItem("fee-ledger-theme", darkMode ? "dark" : "light");
+    document.body.style.background = darkMode ? "#000000" : "#FAF8F2";
+  }, [darkMode]);
+  const [students, setStudents] = useState([]);
+  const [reminders, setReminders] = useState([]);
+  const [expenses, setExpenses] = useState([]);
+  const [view, setView] = useState("ledger"); // "ledger" | "expenses"
+  const [loaded, setLoaded] = useState(false);
+  const [schoolFilter, setSchoolFilter] = useState(allowedSchools.length === 1 ? allowedSchools[0] : "All Schools");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [classFilter, setClassFilter] = useState("All Classes");
+  const [planFilter, setPlanFilter] = useState("all");
+  const [transportOnly, setTransportOnly] = useState(false);
+  const [sortBy, setSortBy] = useState("name");
+  const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState(new Set());
+  const [showAdd, setShowAdd] = useState(false);
+  const [showReminderPanel, setShowReminderPanel] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  const [showReports, setShowReports] = useState(false);
+  const [showBackup, setShowBackup] = useState(false);
+  const [snapshots, setSnapshots] = useState(null);
+  const [toast, setToast] = useState(null);
+  const [payModal, setPayModal] = useState(null);
+  const [historyStudent, setHistoryStudent] = useState(null);
+  const [scheduleStudentId, setScheduleStudentId] = useState(null);
+  const [scheduleMethodByPeriod, setScheduleMethodByPeriod] = useState({});
+  const [transportStudentId, setTransportStudentId] = useState(null);
+  const [previousSessionStudentId, setPreviousSessionStudentId] = useState(null);
+  const [editingId, setEditingId] = useState(null);
+  const [savingStudent, setSavingStudent] = useState(false);
+  const [newStudent, setNewStudent] = useState({ name: "", cls: "", school: allowedSchools[0], phone: "", fatherName: "", transportRate: "", annualFeeAmount: "", total: "", paid: "", due: "", planSelect: "full", installmentAmount: "" });
+  const [showImport, setShowImport] = useState(false);
+  const [importRows, setImportRows] = useState(null);
+  const [importFileName, setImportFileName] = useState("");
+  const [skipDuplicates, setSkipDuplicates] = useState(true);
+  const fileInputRef = useRef(null);
+  const backupFileRef = useRef(null);
+  const [schoolMenuOpen, setSchoolMenuOpen] = useState(false);
+  const schoolMenuRef = useRef(null);
+  const pendingDeletesRef = useRef({}); // id -> timeout handle, for soft-delete undo
+  const pendingExpenseDeletesRef = useRef({});
+
+  // Expense module state
+  const [showAddExpense, setShowAddExpense] = useState(false);
+  const [editingExpenseId, setEditingExpenseId] = useState(null);
+  const [savingExpense, setSavingExpense] = useState(false);
+  const [newExpense, setNewExpense] = useState({ school: allowedSchools[0], category: "", description: "", vendor: "", amount: "", date: todayISO() });
+  const [expenseQuery, setExpenseQuery] = useState("");
+  const [expenseCategoryFilter, setExpenseCategoryFilter] = useState("All Categories");
+  const [expenseSortBy, setExpenseSortBy] = useState("date");
+  const [historyExpense, setHistoryExpense] = useState(null);
+
+  useEffect(() => {
+    function onClickOutside(e) {
+      if (schoolMenuRef.current && !schoolMenuRef.current.contains(e.target)) setSchoolMenuOpen(false);
+    }
+    document.addEventListener("mousedown", onClickOutside);
+    return () => document.removeEventListener("mousedown", onClickOutside);
+  }, []);
+
+  useEffect(() => {
+    // Collector accounts are now blocked from GET /api/reminders (admin-only "no
+    // reports" restriction) — skip that call for them entirely, otherwise
+    // Promise.all's fail-fast behavior would sink students/expenses too the moment
+    // reminders comes back 403, which is exactly what caused "No students yet" to
+    // show up for a collector account that has real data on the server.
+    const calls = isCollector ? [api.getStudents(), api.getExpenses()] : [api.getStudents(), api.getReminders(), api.getExpenses()];
+    Promise.all(calls)
+      .then((results) => {
+        setStudents(results[0]);
+        if (isCollector) {
+          setExpenses(results[1]);
+        } else {
+          setReminders(results[1]);
+          setExpenses(results[2]);
+        }
+      })
+      .catch(() => setToast({ kind: "warn", text: "Couldn't reach the server." }))
+      .finally(() => setLoaded(true));
+  }, []);
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), toast.action ? 6000 : 3200);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  useEffect(() => {
+    if (!showBackup || user.schools) return;
+    api.listSnapshots().then(setSnapshots).catch(() => setSnapshots([]));
+  }, [showBackup]);
+
+  const availableClasses = useMemo(() => {
+    const pool = schoolFilter === "All Schools" ? students : students.filter((s) => s.school === schoolFilter);
+    const classes = Array.from(new Set(pool.map((s) => s.cls))).sort((a, b) => a.localeCompare(b));
+    return ["All Classes", ...classes];
+  }, [students, schoolFilter]);
+
+  useEffect(() => {
+    if (!availableClasses.includes(classFilter)) setClassFilter("All Classes");
+  }, [availableClasses, classFilter]);
+
+  // Names shared by more than one student — used to only show "Father: ..." on rows
+  // where it's actually needed to tell two same-named kids apart, instead of on every row.
+  const duplicateNames = useMemo(() => {
+    const counts = {};
+    students.forEach((s) => { counts[normName(s.name)] = (counts[normName(s.name)] || 0) + 1; });
+    return new Set(Object.keys(counts).filter((n) => counts[n] > 1));
+  }, [students]);
+
+  const filtered = useMemo(() => {
+    let list = students
+      .map((s) => withComputed(s))
+      .map((s) => ({ ...s, status: statusOf(s), balance: s.total - s.paid, daysOverdue: -daysBetween(s.due, todayISO()) }))
+      .filter((s) => (schoolFilter === "All Schools" ? true : s.school === schoolFilter))
+      .filter((s) => (classFilter === "All Classes" ? true : s.cls === classFilter))
+      .filter((s) => (planFilter === "all" ? true : planSelectValue(s.planType, s.frequency) === planFilter))
+      .filter((s) => (!transportOnly ? true : s.transportRate > 0))
+      .filter((s) => (statusFilter === "all" ? true : s.status === statusFilter))
+      .filter((s) => s.name.toLowerCase().includes(query.toLowerCase()));
+    if (sortBy === "name") list.sort((a, b) => a.name.localeCompare(b.name));
+    if (sortBy === "balance") list.sort((a, b) => b.balance - a.balance);
+    if (sortBy === "overdue") list.sort((a, b) => b.daysOverdue - a.daysOverdue);
+    return list;
+  }, [students, schoolFilter, classFilter, planFilter, transportOnly, statusFilter, query, sortBy]);
+
+  const stats = useMemo(() => {
+    const pool = students.map((s) => withComputed(s)).map((s) => ({ ...s, status: statusOf(s) }))
+      .filter((s) => (schoolFilter === "All Schools" ? true : s.school === schoolFilter))
+      .filter((s) => (classFilter === "All Classes" ? true : s.cls === classFilter))
+      .filter((s) => (planFilter === "all" ? true : planSelectValue(s.planType, s.frequency) === planFilter));
+    return {
+      count: pool.length,
+      totalDue: pool.reduce((a, s) => a + (s.total - s.paid), 0),
+      collected: pool.reduce((a, s) => a + s.paid, 0),
+      totalFees: pool.reduce((a, s) => a + s.total, 0),
+      overdue: pool.filter((s) => s.status === "overdue").length,
+      transportDue: pool.reduce((a, s) => a + transportComputed(s).balance, 0),
+      transportCollected: pool.reduce((a, s) => a + transportComputed(s).paid, 0),
+      previousSessionDue: pool.reduce((a, s) => a + (s.previousSessionDue || 0), 0),
+    };
+  }, [students, schoolFilter, classFilter, planFilter]);
+
+  const scheduleStudent = scheduleStudentId ? withComputed(students.find((s) => s.id === scheduleStudentId) || null) : null;
+  useEffect(() => {
+    if (scheduleStudentId && !students.find((s) => s.id === scheduleStudentId)) setScheduleStudentId(null);
+  }, [students, scheduleStudentId]);
+
+  const transportStudent = transportStudentId ? students.find((s) => s.id === transportStudentId) || null : null;
+  useEffect(() => {
+    if (transportStudentId && !students.find((s) => s.id === transportStudentId)) setTransportStudentId(null);
+  }, [students, transportStudentId]);
+
+  const previousSessionStudent = previousSessionStudentId ? students.find((s) => s.id === previousSessionStudentId) || null : null;
+  useEffect(() => {
+    if (previousSessionStudentId && !students.find((s) => s.id === previousSessionStudentId)) setPreviousSessionStudentId(null);
+  }, [students, previousSessionStudentId]);
+
+  const collectionPct = stats.totalFees > 0 ? Math.round((stats.collected / stats.totalFees) * 100) : 0;
+
+  const digest = useMemo(() => {
+    const pool = filtered; // already scoped to schoolFilter/status/search
+    const dueSoon = pool.filter((s) => s.status === "pending" && daysBetween(s.due, todayISO()) <= 3);
+    const overdue = pool.filter((s) => s.status === "overdue");
+    const needsReminderList = pool.filter((s) => needsReminder(s, reminders));
+    return { dueSoon, overdue, needsReminderList };
+  }, [filtered, reminders]);
+
+  const thisMonthCollected = useMemo(() => {
+    const key = monthKey(todayISO());
+    return students.reduce((total, raw) => {
+      if (schoolFilter !== "All Schools" && raw.school !== schoolFilter) return total;
+      if (classFilter !== "All Classes" && raw.cls !== classFilter) return total;
+      if (planFilter !== "all" && planSelectValue(raw.planType, raw.frequency) !== planFilter) return total;
+      const sum = (raw.payments || []).filter((p) => monthKey(p.date) === key).reduce((a, p) => a + Number(p.amount || 0), 0);
+      return total + sum;
+    }, 0);
+  }, [students, schoolFilter, classFilter, planFilter]);
+
+  const availableExpenseCategories = useMemo(() => {
+    const pool = schoolFilter === "All Schools" ? expenses : expenses.filter((e) => e.school === schoolFilter);
+    const cats = Array.from(new Set(pool.map((e) => e.category))).sort((a, b) => a.localeCompare(b));
+    return ["All Categories", ...cats];
+  }, [expenses, schoolFilter]);
+
+  useEffect(() => {
+    if (!availableExpenseCategories.includes(expenseCategoryFilter)) setExpenseCategoryFilter("All Categories");
+  }, [availableExpenseCategories, expenseCategoryFilter]);
+
+  const filteredExpenses = useMemo(() => {
+    let list = expenses
+      .filter((e) => (schoolFilter === "All Schools" ? true : e.school === schoolFilter))
+      .filter((e) => (expenseCategoryFilter === "All Categories" ? true : e.category === expenseCategoryFilter))
+      .filter((e) => {
+        const q = expenseQuery.toLowerCase();
+        if (!q) return true;
+        return e.category.toLowerCase().includes(q) || e.description.toLowerCase().includes(q) || (e.vendor || "").toLowerCase().includes(q);
+      });
+    if (expenseSortBy === "date") list = list.slice().sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+    if (expenseSortBy === "amount") list = list.slice().sort((a, b) => b.amount - a.amount);
+    if (expenseSortBy === "category") list = list.slice().sort((a, b) => a.category.localeCompare(b.category));
+    return list;
+  }, [expenses, schoolFilter, expenseCategoryFilter, expenseQuery, expenseSortBy]);
+
+  const expenseStats = useMemo(() => {
+    const pool = schoolFilter === "All Schools" ? expenses : expenses.filter((e) => e.school === schoolFilter);
+    const key = monthKey(todayISO());
+    const totalSpent = pool.reduce((a, e) => a + e.amount, 0);
+    const spentThisMonth = pool.filter((e) => monthKey(e.date) === key).reduce((a, e) => a + e.amount, 0);
+    return {
+      count: pool.length,
+      totalSpent,
+      spentThisMonth,
+      netThisMonth: thisMonthCollected - spentThisMonth,
+      categories: new Set(pool.map((e) => e.category)).size,
+    };
+  }, [expenses, schoolFilter, thisMonthCollected]);
+
+  const expenseCategoryBreakdown = useMemo(() => {
+    const pool = schoolFilter === "All Schools" ? expenses : expenses.filter((e) => e.school === schoolFilter);
+    const groups = {};
+    pool.forEach((e) => {
+      if (!groups[e.category]) groups[e.category] = { key: e.category, count: 0, total: 0 };
+      groups[e.category].count += 1;
+      groups[e.category].total += e.amount;
+    });
+    return Object.values(groups).sort((a, b) => b.total - a.total);
+  }, [expenses, schoolFilter]);
+
+  const monthlySeries = useMemo(() => {
+    const pool = schoolFilter === "All Schools" ? students : students.filter((s) => s.school === schoolFilter);
+    return collectionSeries(pool, 6);
+  }, [students, schoolFilter]);
+
+  const classBreakdown = useMemo(() => {
+    const pool = students.map((s) => withComputed(s)).filter((s) => (schoolFilter === "All Schools" ? true : s.school === schoolFilter));
+    const groups = {};
+    pool.forEach((s) => {
+      const key = schoolFilter === "All Schools" ? `${s.school} · ${s.cls}` : s.cls;
+      if (!groups[key]) groups[key] = { key, count: 0, total: 0, collected: 0 };
+      groups[key].count += 1;
+      groups[key].total += s.total;
+      groups[key].collected += s.paid;
+    });
+    return Object.values(groups).sort((a, b) => a.key.localeCompare(b.key));
+  }, [students, schoolFilter]);
+
+  function toggleSelect(id) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }
+
+  function selectAllUnpaid() {
+    setSelected(new Set(filtered.filter((s) => s.status !== "paid").map((s) => s.id)));
+  }
+
+  async function logSingleReminder(s) {
+    const entry = { studentId: s.id, name: s.name, school: s.school, phone: s.phone, balance: computeTotalPending(s), message: defaultTemplate(s) };
+    try {
+      const saved = await api.logReminder(entry);
+      setReminders((r) => [saved, ...r]);
+    } catch {}
+  }
+
+  async function sendReminders() {
+    const targets = filtered.filter((s) => selected.has(s.id));
+    if (targets.length === 0) return setToast({ kind: "warn", text: "Select at least one student." });
+    for (const s of targets) await logSingleReminder(s);
+    setToast({ kind: "ok", text: `Logged ${targets.length} reminder${targets.length > 1 ? "s" : ""} as sent.` });
+    setSelected(new Set());
+    setShowReminderPanel(false);
+  }
+
+  async function recordPayment(id, amount, method) {
+    try {
+      const updated = await api.recordPayment(id, amount, method);
+      setStudents((prev) => prev.map((s) => (s.id === id ? updated : s)));
+      setPayModal(null);
+      setToast({ kind: "ok", text: "Payment recorded." });
+    } catch (err) {
+      setToast({ kind: "warn", text: err.message });
+    }
+  }
+
+  async function markInstallmentPaid(studentId, period, method) {
+    const s = students.find((x) => x.id === studentId);
+    if (!s) return;
+    const inst = (s.installments || []).find((i) => i.period === period);
+    if (!inst || inst.paid) return;
+    try {
+      // Server marks this one installment paid atomically (row-locked) — we don't
+      // send the array back ourselves, so a second person acting on the same
+      // student at nearly the same time can't clobber this change. See db.js.
+      const updated = await api.markInstallmentPaid(studentId, period, method);
+      setStudents((prev) => prev.map((x) => (x.id === studentId ? updated : x)));
+      setToast({ kind: "ok", text: `${inst.period} marked paid.` });
+    } catch (err) {
+      setToast({ kind: "warn", text: err.message });
+    }
+  }
+
+  async function toggleTransportMonth(studentId, month, enabled) {
+    try {
+      const updated = await api.toggleTransportMonth(studentId, month, enabled);
+      setStudents((prev) => prev.map((x) => (x.id === studentId ? updated : x)));
+    } catch (err) {
+      setToast({ kind: "warn", text: err.message });
+    }
+  }
+
+  async function recordTransportPayment(studentId, amount, method) {
+    try {
+      const updated = await api.recordTransportPayment(studentId, amount, method);
+      setStudents((prev) => prev.map((x) => (x.id === studentId ? updated : x)));
+      setToast({ kind: "ok", text: `Recorded ${money(amount)} transport payment.` });
+    } catch (err) {
+      setToast({ kind: "warn", text: err.message });
+    }
+  }
+
+  async function recordPreviousSessionPayment(studentId, amount, method) {
+    try {
+      const updated = await api.recordPreviousSessionPayment(studentId, amount, method);
+      setStudents((prev) => prev.map((x) => (x.id === studentId ? updated : x)));
+      setToast({ kind: "ok", text: `Recorded ${money(amount)} previous-session payment.` });
+    } catch (err) {
+      setToast({ kind: "warn", text: err.message });
+    }
+  }
+
+  async function resetTransport(studentId) {
+    if (!window.confirm("This clears every opted-in month, the paid total, and the payment log for transport on this student. Continue?")) return;
+    try {
+      const updated = await api.resetTransport(studentId);
+      setStudents((prev) => prev.map((x) => (x.id === studentId ? updated : x)));
+      setToast({ kind: "ok", text: "Transport reset." });
+    } catch (err) {
+      setToast({ kind: "warn", text: err.message });
+    }
+  }
+
+  async function regenerateSchedule(studentId) {
+    const s = students.find((x) => x.id === studentId);
+    if (!s) return;
+    if (!window.confirm("This rebuilds the payment schedule from scratch and clears all paid marks. Continue?")) return;
+    try {
+      // Server rebuilds the schedule itself (row-locked, same pattern as
+      // markInstallmentPaid) rather than us computing it here and PUTing the
+      // whole array back — keeps this safe even if acted on from two tabs at once.
+      const updated = await api.regenerateSchedule(studentId);
+      setStudents((prev) => prev.map((x) => (x.id === studentId ? updated : x)));
+      setToast({ kind: "ok", text: "Schedule regenerated." });
+    } catch (err) {
+      setToast({ kind: "warn", text: err.message });
+    }
+  }
+
+  async function saveStudent() {
+    if (savingStudent) return; // guards against a double-click creating two identical students
+    const plan = PLAN_SELECT_OPTIONS.find((p) => p.value === newStudent.planSelect) || PLAN_SELECT_OPTIONS[0];
+    const isInstallment = plan.planType !== "full";
+
+    if (!newStudent.name || !newStudent.due) {
+      return setToast({ kind: "warn", text: "Name and due date are required." });
+    }
+    if (!isInstallment && !newStudent.total) {
+      return setToast({ kind: "warn", text: "Total fee is required for a one-time plan." });
+    }
+    if (isInstallment && !newStudent.installmentAmount) {
+      return setToast({ kind: "warn", text: "Installment amount is required for this plan." });
+    }
+
+    const base = { name: newStudent.name, cls: newStudent.cls, school: newStudent.school, phone: newStudent.phone, fatherName: newStudent.fatherName, transportRate: Number(newStudent.transportRate) || 0, annualFeeAmount: Number(newStudent.annualFeeAmount) || 0 };
+    let payload;
+    if (!isInstallment) {
+      payload = { ...base, planType: "full", frequency: null, total: newStudent.total, paid: newStudent.paid, due: newStudent.due };
+      if (editingId) {
+        // Editing "Already paid" directly (rather than through Record Payment) used to
+        // desync the payments log from the paid total — e.g. reducing paid to correct a
+        // mistake wouldn't reduce "Collected this month", since that figure is summed
+        // straight from the payments log, not from paid. Log the difference as an
+        // adjustment entry so the log and the paid total always agree.
+        const original = students.find((x) => x.id === editingId);
+        const delta = Number(newStudent.paid || 0) - Number(original?.paid || 0);
+        if (delta !== 0) {
+          payload.payments = [...(original?.payments || []), { amount: delta, date: new Date().toISOString(), note: "adjustment", by: user.name || user.email }];
+        }
+      }
+    } else if (!editingId) {
+      // New installment-plan student: generate the schedule now.
+      const installments = generateInstallments(plan.planType, plan.frequency, newStudent.due, newStudent.installmentAmount);
+      const total = installments.reduce((a, i) => a + Number(i.amount || 0), 0);
+      payload = { ...base, planType: plan.planType, frequency: plan.frequency, installmentAmount: Number(newStudent.installmentAmount), due: newStudent.due, total, paid: 0, installments };
+    } else {
+      // Editing an existing installment-plan student. If the plan type, frequency,
+      // amount, or start date actually changed, the old schedule no longer matches
+      // (different count/spacing/amount) — e.g. switching Monthly -> Quarterly used
+      // to leave the old 12-entry monthly schedule sitting untouched underneath a
+      // "Quarterly · 4" badge. Rebuild it now instead of leaving that stale, so the
+      // badge, the schedule modal, and the totals all agree with each other.
+      // If nothing plan-related changed (just name/class/phone etc.), leave the
+      // schedule and paid marks untouched.
+      const original = students.find((x) => x.id === editingId);
+      const newAmount = Number(newStudent.installmentAmount);
+      const planChanged =
+        !original ||
+        original.planType !== plan.planType ||
+        original.frequency !== plan.frequency ||
+        Number(original.installmentAmount) !== newAmount ||
+        original.due !== newStudent.due;
+
+      if (planChanged) {
+        if (!window.confirm("Changing the plan type, amount, or start date rebuilds the payment schedule and clears any paid marks. Continue?")) {
+          return;
+        }
+        const installments = generateInstallments(plan.planType, plan.frequency, newStudent.due, newStudent.installmentAmount);
+        const total = installments.reduce((a, i) => a + Number(i.amount || 0), 0);
+        payload = { ...base, planType: plan.planType, frequency: plan.frequency, installmentAmount: newAmount, due: newStudent.due, total, paid: 0, installments, payments: [] };
+      } else {
+        payload = { ...base, planType: plan.planType, frequency: plan.frequency, installmentAmount: newAmount };
+      }
+    }
+
+    setSavingStudent(true);
+    try {
+      if (editingId) {
+        const updated = await api.updateStudent(editingId, payload);
+        setStudents((prev) => prev.map((s) => (s.id === editingId ? updated : s)));
+        setToast({ kind: "ok", text: "Student updated." });
+      } else {
+        const created = await api.addStudent(payload);
+        setStudents((prev) => [created, ...prev]);
+        setToast({ kind: "ok", text: "Student added." });
+      }
+      setShowAdd(false);
+      setEditingId(null);
+      setNewStudent({ name: "", cls: "", school: allowedSchools[0], phone: "", fatherName: "", transportRate: "", annualFeeAmount: "", total: "", paid: "", due: "", planSelect: "full", installmentAmount: "" });
+    } catch (err) {
+      setToast({ kind: "warn", text: err.message });
+    } finally {
+      setSavingStudent(false);
+    }
+  }
+
+  function openEdit(s) {
+    setEditingId(s.id);
+    // For an installment plan, `s.due` (as passed in from the ledger row) has
+    // already been recomputed to the *next unpaid* installment's due date, not
+    // the schedule's original start date. The edit form's "First installment
+    // due date" field means the latter, so pull it straight from the schedule.
+    const firstDue = isInstallmentPlan(s) && s.installments && s.installments[0] ? s.installments[0].due : s.due;
+    setNewStudent({
+      name: s.name, cls: s.cls, school: s.school, phone: s.phone, fatherName: s.fatherName || "",
+      transportRate: s.transportRate ? String(s.transportRate) : "",
+      annualFeeAmount: s.annualFeeAmount ? String(s.annualFeeAmount) : "",
+      total: String(s.total), paid: String(s.paid), due: firstDue,
+      planSelect: planSelectValue(s.planType, s.frequency),
+      installmentAmount: s.installmentAmount ? String(s.installmentAmount) : "",
+    });
+    setShowAdd(true);
+  }
+
+  async function removeStudent(id) {
+    const student = students.find((s) => s.id === id);
+    if (!student) return;
+    setStudents((prev) => prev.filter((s) => s.id !== id));
+    const timeoutId = setTimeout(async () => {
+      delete pendingDeletesRef.current[id];
+      try {
+        await api.deleteStudent(id);
+      } catch {
+        setToast({ kind: "warn", text: "Couldn't delete on server — refresh to check." });
+      }
+    }, 5000);
+    pendingDeletesRef.current[id] = { timeoutId, student };
+    setToast({
+      kind: "ok",
+      text: `Removed ${student.name}.`,
+      action: {
+        label: "Undo",
+        onClick: () => {
+          const pending = pendingDeletesRef.current[id];
+          if (!pending) return;
+          clearTimeout(pending.timeoutId);
+          delete pendingDeletesRef.current[id];
+          setStudents((prev) => [pending.student, ...prev]);
+        },
+      },
+    });
+  }
+
+  async function saveExpense() {
+    if (savingExpense) return;
+    if (!newExpense.school || !newExpense.amount || !newExpense.date) {
+      return setToast({ kind: "warn", text: "School, amount, and date are required." });
+    }
+    // Expenses represent money already spent — a future date doesn't mean anything
+    // for this kind of record (unlike a fee due date, which is meant to be ahead).
+    if (newExpense.date > todayISO()) {
+      return setToast({ kind: "warn", text: "Expense date can't be in the future." });
+    }
+    const payload = {
+      school: newExpense.school,
+      category: newExpense.category.trim() || "Miscellaneous",
+      description: newExpense.description,
+      vendor: newExpense.vendor,
+      amount: Number(newExpense.amount),
+      date: newExpense.date,
+    };
+    setSavingExpense(true);
+    try {
+      if (editingExpenseId) {
+        const updated = await api.updateExpense(editingExpenseId, payload);
+        setExpenses((prev) => prev.map((e) => (e.id === editingExpenseId ? updated : e)));
+        setToast({ kind: "ok", text: "Expense updated." });
+      } else {
+        const created = await api.addExpense(payload);
+        setExpenses((prev) => [created, ...prev]);
+        setToast({ kind: "ok", text: "Expense added." });
+      }
+      setShowAddExpense(false);
+      setEditingExpenseId(null);
+      setNewExpense({ school: allowedSchools[0], category: "", description: "", vendor: "", amount: "", date: todayISO() });
+    } catch (err) {
+      setToast({ kind: "warn", text: err.message });
+    } finally {
+      setSavingExpense(false);
+    }
+  }
+
+  function openEditExpense(e) {
+    setEditingExpenseId(e.id);
+    setNewExpense({ school: e.school, category: e.category, description: e.description, vendor: e.vendor, amount: String(e.amount), date: e.date });
+    setShowAddExpense(true);
+  }
+
+  async function removeExpense(id) {
+    const expense = expenses.find((e) => e.id === id);
+    if (!expense) return;
+    setExpenses((prev) => prev.filter((e) => e.id !== id));
+    const timeoutId = setTimeout(async () => {
+      delete pendingExpenseDeletesRef.current[id];
+      try {
+        await api.deleteExpense(id);
+      } catch {
+        setToast({ kind: "warn", text: "Couldn't delete on server — refresh to check." });
+      }
+    }, 5000);
+    pendingExpenseDeletesRef.current[id] = { timeoutId, expense };
+    setToast({
+      kind: "ok",
+      text: `Removed expense.`,
+      action: {
+        label: "Undo",
+        onClick: () => {
+          const pending = pendingExpenseDeletesRef.current[id];
+          if (!pending) return;
+          clearTimeout(pending.timeoutId);
+          delete pendingExpenseDeletesRef.current[id];
+          setExpenses((prev) => [pending.expense, ...prev]);
+        },
+      },
+    });
+  }
+
+  function exportExpenses(list) {
+    const rows = list.map((e) => ({
+      School: e.school, Category: e.category, Description: e.description, Vendor: e.vendor, Amount: e.amount, Date: e.date,
+    }));
+    const ws = XLSX.utils.json_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Expenses");
+    XLSX.writeFile(wb, `expenses-export-${todayISO()}.xlsx`);
+  }
+
+  function handleFileSelect(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    setImportFileName(file.name);
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const rows = parseWorkbook(evt.target.result).map((r) => ({ ...r, duplicate: !!findDuplicate(r, students) }));
+        setImportRows(rows);
+      } catch {
+        setToast({ kind: "warn", text: "Couldn't read that file." });
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  }
+
+  async function confirmImport() {
+    const valid = importRows
+      .filter((r) => r.name && r.total > 0 && r.due)
+      .filter((r) => !(skipDuplicates && r.duplicate))
+      .map(({ errors, rowNum, id, duplicate, ...s }) => {
+        if (s.planType === "full") return s;
+        const installments = markInstallmentsFromPaidTotal(
+          generateInstallments(s.planType, s.frequency, s.due, s.installmentAmount),
+          s.paid
+        );
+        const paid = installments.filter((i) => i.paid).reduce((a, i) => a + Number(i.amount || 0), 0);
+        return { ...s, installments, paid };
+      });
+    if (valid.length === 0) return setToast({ kind: "warn", text: "No valid rows to import." });
+    try {
+      const created = await api.bulkImport(valid);
+      setStudents((prev) => [...created, ...prev]);
+      setToast({ kind: "ok", text: `Imported ${created.length} students.` });
+      setShowImport(false);
+      setImportRows(null);
+      setImportFileName("");
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    } catch (err) {
+      setToast({ kind: "warn", text: err.message });
+    }
+  }
+
+  const unpaidSelectable = filtered.filter((s) => s.status !== "paid");
+
+  async function downloadBackup() {
+    try {
+      const data = await api.getBackup();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `fee-ledger-backup-${todayISO()}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setToast({ kind: "ok", text: "Backup downloaded." });
+    } catch (err) {
+      setToast({ kind: "warn", text: err.message });
+    }
+  }
+
+  function handleBackupFileSelect(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async (evt) => {
+      try {
+        const data = JSON.parse(evt.target.result);
+        if (!window.confirm(`This restores ${data.students?.length ?? 0} students, ${data.reminders?.length ?? 0} reminders, and ${data.expenses?.length ?? 0} expenses from this file, overwriting current data in your allowed school(s). Continue?`)) return;
+        const result = await api.restoreBackup(data);
+        setToast({ kind: "ok", text: `Restored ${result.studentsRestored} students.` });
+        const [s, r, e] = await Promise.all([api.getStudents(), api.getReminders(), api.getExpenses()]);
+        setStudents(s);
+        setReminders(r);
+        setExpenses(e);
+        setShowBackup(false);
+      } catch (err) {
+        setToast({ kind: "warn", text: err.message || "Couldn't read that backup file." });
+      }
+    };
+    reader.readAsText(file);
+    if (backupFileRef.current) backupFileRef.current.value = "";
+  }
+
+  async function restoreFromSnapshot(snap) {
+    if (!window.confirm(`Restore the automatic snapshot from ${formatDateTime(snap.taken_at)} (${snap.student_count} students)? This overwrites current data — a fresh safety snapshot of what's there right now is taken automatically first.`)) return;
+    try {
+      const result = await api.restoreSnapshot(snap.id);
+      setToast({ kind: "ok", text: `Restored ${result.studentsRestored} students from snapshot.` });
+      const [s, r, e] = await Promise.all([api.getStudents(), api.getReminders(), api.getExpenses()]);
+      setStudents(s);
+      setReminders(r);
+      setExpenses(e);
+      setShowBackup(false);
+    } catch (err) {
+      setToast({ kind: "warn", text: err.message });
+    }
+  }
+
+  if (!loaded) return <div style={{ minHeight: "100vh", background: "#FAF8F2" }} />;
+
+  return (
+    <div className={`wrap${darkMode ? " dark" : ""}`}>
+      <style>{`
+        ${FONT_IMPORT}
+        * { box-sizing: border-box; -webkit-font-smoothing: antialiased; }
+        :root {
+          --sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+          --display: 'Space Grotesk', var(--sans);
+          --mono: 'IBM Plex Mono', ui-monospace, -apple-system, 'SF Mono', Menlo, monospace;
+          --bg: #FAF8F2; --card: #ffffff; --card-alt: #F2EFE6;
+          --ink: #0B0B0C; --text-soft: #514E45; --text-mute: #8B8776;
+          --line: #17140F; --line-soft: #E6E2D3;
+          --surface-hover: #F2EFE4; --row-hover: #FBFAF5;
+          --menu-bg: #ffffff; --stat-bg: #ffffff;
+          --accent: #6E2BE0; --accent-dark: #5420A8; --accent-hover: #5420A8; --accent-tint: rgba(110,43,224,0.1);
+          --highlight: #C6FF33; --highlight-ink: #3D5300; --highlight-tint: rgba(198,255,51,0.22);
+          --paid: #3D5300; --paid-bg: rgba(198,255,51,0.28);
+          --due: #B8590A; --due-bg: rgba(184,89,10,0.1);
+          --over: #C4102A; --over-bg: rgba(196,16,42,0.09);
+          --whatsapp: #25D366;
+          --overlay: rgba(11,11,12,0.45);
+        }
+        .wrap.dark {
+          color-scheme: dark;
+          --bg: #000000; --card: #17151A; --card-alt: #201D24;
+          --ink: #F2F0EA; --text-soft: #B2AEA2; --text-mute: #837F73;
+          --line: #EDEAE0; --line-soft: #2C2A24;
+          --surface-hover: #201D24; --row-hover: #1B191E;
+          --menu-bg: #17151A; --stat-bg: #17151A;
+          --accent: #A874FF; --accent-dark: #C6A6FF; --accent-hover: #B98CFF; --accent-tint: rgba(168,116,255,0.2);
+          --highlight: #C6FF33; --highlight-ink: #1B2400; --highlight-tint: rgba(198,255,51,0.16);
+          --paid: #C6FF33; --paid-bg: rgba(198,255,51,0.14);
+          --due: #FF9F0A; --due-bg: rgba(255,159,10,0.14);
+          --over: #FF5C48; --over-bg: rgba(255,92,72,0.14);
+          --overlay: rgba(0,0,0,0.7);
+        }
+        @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
+
+        .wrap { min-height: 100vh; background: var(--bg); font-family: var(--sans); color: var(--ink); padding-bottom: 60px; -webkit-font-smoothing: antialiased; }
+        h1,h2,h3 { font-family: var(--display); }
+        .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+        a { color: inherit; }
+
+        /* The masthead: a constant black bar in both themes (like a printed ledger's
+           header row), with a single lime rule underneath. It doesn't shift with
+           light/dark mode — it's the one fixed anchor of the brand. */
+        .header { background: #0B0B0C; border-bottom: 3px solid var(--highlight); color: #fff; padding: 20px 24px 18px; position: relative; }
+        .header-top { display:flex; align-items:center; justify-content:space-between; gap: 12px; flex-wrap: wrap; }
+        .brand { display:flex; align-items:center; gap:10px; }
+        .brand-mark { width: 34px; height: 34px; border-radius: 4px; background: #fff; color: #0B0B0C; display:flex; align-items:center; justify-content:center; font-family: var(--display); font-weight:700; font-size: 13px; letter-spacing: -0.2px; }
+        .brand-title { font-family: var(--display); font-size: 19px; font-weight:700; letter-spacing: -0.2px; color: #fff; }
+        .brand-sub { font-family: var(--mono); font-size: 11px; color: rgba(255,255,255,0.5); letter-spacing: 0.2px; margin-top: 2px; }
+
+        .user-chip { display:flex; align-items:center; gap:8px; background: rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.18); padding: 4px 10px 4px 5px; border-radius: 999px; transition: background 0.15s ease; color: #fff; }
+        .user-chip:hover { background: rgba(255,255,255,0.16); }
+        .user-chip img { width:22px; height:22px; border-radius:50%; display:block; }
+        .icon-plain { background:none; border:none; color: rgba(255,255,255,0.7); cursor:pointer; display:flex; padding: 4px; border-radius: 6px; transition: color 0.15s ease; }
+        .icon-plain:hover { color: #fff; }
+        .theme-toggle { background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.18); width: 30px; height: 30px; border-radius: 50%; align-items: center; justify-content: center; padding: 0; }
+        .theme-toggle:hover { background: rgba(255,255,255,0.16); color: #fff; }
+
+        .select-field { background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.22); color: #fff; padding: 7px 28px 7px 12px; border-radius: 7px; font-size: 13px; font-weight: 500; appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23ffffff' stroke-width='1.4' fill='none'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 11px center; cursor: pointer; transition: background 0.15s ease; }
+        .select-field:hover { background: rgba(255,255,255,0.16); }
+        .select-field.light { background-color: var(--card-alt); border: 1px solid var(--line-soft); color: var(--ink); background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23514E45' stroke-width='1.4' fill='none'/%3E%3C/svg%3E"); }
+        .dropdown-wrap { position: relative; }
+        .dropdown-trigger { display:flex; align-items:center; gap: 7px; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.22); color: #fff; padding: 7px 12px; border-radius: 7px; font-size: 13px; font-weight: 500; cursor: pointer; transition: background 0.15s ease; }
+        .dropdown-trigger:hover { background: rgba(255,255,255,0.16); }
+        .dropdown-menu { position: absolute; top: calc(100% + 6px); left: 0; min-width: 220px; max-width: calc(100vw - 32px); background: var(--menu-bg); border: 1.5px solid var(--ink); border-radius: 6px; box-shadow: 3px 3px 0 var(--ink); padding: 5px; z-index: 40; animation: dropIn 0.14s ease; color: var(--ink); }
+        @keyframes dropIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+        .dropdown-item { display:flex; align-items:center; justify-content:space-between; gap: 8px; width: 100%; text-align:left; background: none; border: none; padding: 8px 10px; border-radius: 4px; font-size: 13.5px; color: var(--ink); cursor: pointer; transition: background 0.1s ease; }
+        .dropdown-item:hover { background: var(--card-alt); }
+        .dropdown-item.active { color: var(--accent); font-weight: 600; }
+        .dropdown-item.active svg { color: var(--accent); }
+
+        /* Signature element: the collection meter, styled like a charge/fill gauge —
+           flat lime fill (no gradient) on a translucent black track, mono percentage.
+           This is the one place the page allows itself to feel bold. */
+        .meter-row { display:flex; align-items:baseline; gap: 14px; margin-top: 22px; }
+        .meter-track { flex:1; height: 10px; background: rgba(255,255,255,0.14); overflow:hidden; position: relative; align-self: center; }
+        .meter-fill { height: 100%; background: var(--highlight); transition: width 0.6s cubic-bezier(0.22,1,0.36,1); }
+        .meter-label { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: rgba(255,255,255,0.55); white-space: nowrap; }
+        .meter-pct { font-family: var(--mono); font-size: 19px; font-weight: 700; color: var(--highlight); white-space: nowrap; letter-spacing: -0.3px; }
+
+        .stats-row { display: grid; grid-template-columns: repeat(2, 1fr); border: 1.5px solid var(--ink); border-top: none; margin-top: 16px; }
+        @media (min-width: 720px) { .stats-row { grid-template-columns: repeat(4, 1fr); } }
+        .stat-card { position:relative; background: var(--stat-bg); padding: 13px 16px; border-right: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft); }
+        .stat-card:nth-child(2n) { border-right: none; }
+        @media (min-width: 720px) { .stat-card:nth-child(2n) { border-right: 1px solid var(--line-soft); } .stat-card:last-child { border-right: none; } .stat-card { border-bottom: none; } }
+        .stat-card.wide { grid-column: 1 / -1; display:flex; align-items:baseline; justify-content:space-between; gap: 10px; }
+        .stat-card.wide .stat-label { margin-bottom: 0; }
+        .stat-label { font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-mute); margin-bottom: 6px; font-weight: 500; }
+        .stat-value { font-family: var(--mono); font-size: 19px; font-weight: 700; color: var(--ink); letter-spacing: -0.3px; }
+        .stat-value.amber { color: var(--due); } .stat-value.red { color: var(--over); }
+
+        .note-banner { background: var(--card); border:1.5px solid var(--line-soft); border-left: 4px solid var(--accent); color: var(--text-soft); font-size:12.5px; line-height: 1.5; padding:10px 14px; margin: 14px 20px 0; max-width:1040px; margin-left:auto; margin-right:auto; }
+        .digest-banner { display:flex; align-items:center; justify-content:space-between; gap: 12px; flex-wrap:wrap; background: var(--card); border:1.5px solid var(--line-soft); border-left: 4px solid var(--over); color: var(--text-soft); font-size:12.5px; line-height: 1.5; padding:10px 14px; margin: 10px 20px 0; max-width:1040px; margin-left:auto; margin-right:auto; }
+        .digest-text strong { color: var(--over); }
+
+        .toolbar { max-width: 1080px; margin: 18px auto 0; padding: 0 20px; }
+        .toolbar-card { background: var(--card); border: 1.5px solid var(--ink); padding: 10px; display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+        .search-box { display:flex; align-items:center; gap:8px; flex:1; min-width: 170px; border:1.5px solid var(--line-soft); padding:8px 12px; background: var(--bg); transition: border-color 0.15s ease, background 0.15s ease; }
+        .search-box:focus-within { border-color: var(--accent); background: var(--card); }
+        .search-box input { border:none; outline:none; background:transparent; font-size: 14px; width:100%; color: var(--ink); font-family: var(--sans); }
+        .pill-select { border:1.5px solid var(--line-soft); padding:8px 26px 8px 10px; font-size:13px; font-weight: 500; background-color: var(--bg); color:var(--ink); appearance:none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23514E45' stroke-width='1.4' fill='none'/%3E%3C/svg%3E"); background-repeat:no-repeat; background-position: right 9px center; cursor:pointer; transition: background 0.15s ease; }
+        .pill-select:hover { background-color: var(--surface-hover); }
+
+        /* Status filter — flat segmented strip, active tab underlined rather than a soft pill */
+        .segmented { display:flex; background: var(--bg); border: 1.5px solid var(--line-soft); padding: 2px; gap: 2px; }
+        .segmented button { border:none; background:transparent; padding: 7px 11px; font-size: 12.5px; font-weight: 600; color: var(--text-soft); cursor: pointer; transition: background 0.15s ease, color 0.15s ease; white-space: nowrap; font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.3px; }
+        .segmented button.active { background: var(--ink); color: var(--bg); }
+        .view-tabs { margin-top: 18px; display: inline-flex; background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.22); }
+        .view-tabs button { color: rgba(255,255,255,0.6); }
+        .view-tabs button.active { background: var(--highlight); color: #0B0B0C; }
+
+        .btn { border:none; border-radius:3px; padding:8px 14px; font-size:13.5px; font-weight:700; display:flex; align-items:center; gap:6px; cursor:pointer; white-space:nowrap; transition: opacity 0.12s ease, background 0.15s ease; font-family: var(--sans); }
+        .btn:active { opacity: 0.75; }
+        .btn-primary { background: var(--accent); color: #fff; }
+        .btn-primary:hover { background: var(--accent-hover); }
+        .btn-whatsapp { background: var(--whatsapp); color:#fff; }
+        .btn-whatsapp:hover { background: #21BD5C; }
+        .btn-ghost { background: var(--card); color: var(--ink); border:1.5px solid var(--ink); }
+        .btn-ghost:hover { background: var(--surface-hover); }
+
+        .content { max-width: 1080px; margin: 20px auto 0; padding: 0 20px; }
+        .section-label { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: #fff; background: var(--ink); margin: 18px 0 0; padding: 7px 14px; display:flex; justify-content: space-between; align-items:center; font-weight: 600; }
+
+        .ledger { background: var(--card); border:1.5px solid var(--ink); border-top: none; }
+        .row { display:grid; grid-template-columns: 20px 34px 1fr auto; gap: 12px; align-items:center; padding: 13px 16px; border-bottom: 1px solid var(--line-soft); transition: background 0.1s ease; }
+        .row:last-child { border-bottom: none; }
+        .row:hover { background: var(--row-hover); }
+        .avatar { width: 32px; height: 32px; border-radius: 4px; border: 1.3px solid currentColor; display:flex; align-items:center; justify-content:center; font-family: var(--mono); font-weight: 600; font-size: 11px; flex-shrink:0; }
+        .row-name { font-family: var(--display); font-weight:700; font-size:14.5px; color: var(--ink); letter-spacing: -0.1px; }
+        .row-sub { font-family: var(--mono); font-size:11.5px; color:var(--text-mute); margin-top:3px; }
+        .plan-chip { display:inline-flex; align-items:center; font-family: var(--mono); font-size:10px; font-weight:600; text-transform: uppercase; letter-spacing: 0.3px; color: var(--text-soft); background: var(--card-alt); border: 1px solid var(--line-soft); padding: 2px 7px; margin-top: 6px; }
+        .progress-track { height: 3px; background: var(--line-soft); margin-top: 7px; width: 140px; max-width: 60%; overflow:hidden; }
+        .progress-fill { height: 100%; transition: width 0.4s ease; }
+        .row-right { display:flex; align-items:center; gap:12px; }
+        .amounts { text-align:right; cursor: default; }
+        .amounts.clickable { cursor:pointer; padding: 2px 4px; margin: -2px -4px; transition: background 0.12s ease; }
+        .amounts.clickable:hover { background: var(--card-alt); }
+        .amt-balance { font-family: var(--mono); font-weight:700; font-size:14.5px; color: var(--ink); letter-spacing: -0.2px; }
+        .amt-sub { font-family: var(--mono); font-size:11px; color:var(--text-mute); }
+        /* The signature status mark: styled like a rubber ink-stamp on a paper ledger,
+           not a soft SaaS pill — square corners, heavy mono type, faint rotation. */
+        .stamp { display:inline-flex; align-items:center; gap:4px; font-family: var(--mono); font-size: 10px; font-weight:700; text-transform: uppercase; letter-spacing: 0.5px; padding: 3px 8px; border: 1.6px solid; border-radius: 3px; transform: rotate(-2deg); margin-top: 6px; }
+        .row-actions { display:flex; gap:5px; }
+        .icon-btn { border: 1.3px solid var(--line-soft); background: var(--card); border-radius:4px; width:28px; height:28px; display:flex; align-items:center; justify-content:center; cursor:pointer; color:var(--text-soft); transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease; }
+        .icon-btn:hover { background: var(--surface-hover); color: var(--ink); border-color: var(--ink); }
+        .checkbox { width:16px; height:16px; accent-color: var(--accent); cursor:pointer; }
+
+        .empty { padding: 52px 24px; text-align:center; }
+        .empty-title { font-family: var(--display); font-size: 16px; font-weight: 700; color: var(--ink); margin-bottom: 4px; }
+        .empty-body { font-size: 13px; color: var(--text-mute); }
+
+        .modal-backdrop { position:fixed; inset:0; background:var(--overlay); display:flex; align-items:flex-end; justify-content:center; z-index:50; animation: fadeIn 0.15s ease; }
+        @media (min-width:720px) { .modal-backdrop { align-items:center; } }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes slideUp { from { transform: translateY(16px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+        .modal { background: var(--card); width:100%; max-width:480px; padding:20px; max-height:88vh; overflow:auto; animation: slideUp 0.22s cubic-bezier(0.22,1,0.36,1); border: 1.5px solid var(--ink); border-bottom: none; }
+        @media (min-width:720px) { .modal { border-bottom: 1.5px solid var(--ink); } }
+        .modal-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; padding-bottom: 12px; border-bottom: 1.5px solid var(--ink); }
+        .modal-title { font-family: var(--display); font-size:18px; font-weight:700; color: var(--ink); letter-spacing: -0.2px; }
+        .field { margin-bottom: 12px; }
+        .field label { font-family: var(--mono); font-size:10.5px; font-weight:600; text-transform: uppercase; letter-spacing: 0.4px; color:var(--text-mute); display:block; margin-bottom:6px; }
+        .field input, .field select { width:100%; border:1.5px solid var(--line-soft); border-radius:0; padding:9px 11px; font-size:14px; font-family: var(--sans); background: var(--card); color: var(--ink); transition: border-color 0.15s ease; }
+        .field input:focus, .field select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-tint); }
+        .field-row { display:grid; grid-template-columns: 1fr 1fr; gap:10px; }
+
+        .reminder-item { border:1.5px solid var(--line-soft); padding:10px 12px; margin-bottom:8px; transition: border-color 0.12s ease; background: var(--card); }
+        .reminder-item:hover { border-color: var(--ink); }
+        .reminder-item label { display:flex; align-items:flex-start; gap:10px; cursor:pointer; }
+        .reminder-msg { font-family: var(--mono); font-size:12px; color:var(--text-soft); margin-top:6px; line-height:1.5; background: var(--card-alt); padding:8px; }
+
+        .toast { position:fixed; bottom:18px; left:50%; transform:translateX(-50%); background: #0B0B0C; color: #fff; padding:11px 18px; border: 1.5px solid var(--highlight); font-size:13.5px; display:flex; align-items:center; gap:8px; z-index:60; animation: toastIn 0.2s cubic-bezier(0.22,1,0.36,1); }
+        @keyframes toastIn { from { transform: translate(-50%, 10px); opacity: 0; } to { transform: translate(-50%, 0); opacity: 1; } }
+        .toast.warn { background: #0B0B0C; border-color: var(--due); }
+        .toast-action { background: rgba(255,255,255,0.16); border:1px solid rgba(255,255,255,0.3); color:#fff; font-weight:600; font-size:12.5px; padding:5px 10px; cursor:pointer; margin-left: 4px; }
+        .toast-action:hover { background: rgba(255,255,255,0.26); }
+
+        .history-item { padding:12px 14px; border-bottom:1px solid var(--line-soft); }
+        .history-item:last-child { border-bottom:none; }
+        .history-top { display:flex; justify-content:space-between; font-size:13px; font-weight:600; }
+        .history-time { font-family: var(--mono); font-size:11px; color:var(--text-mute); }
+        .history-msg { font-size:12.5px; color:var(--text-soft); margin-top:4px; }
+
+        .report-section-label { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color:var(--text-mute); margin-bottom: 10px; font-weight: 600; }
+        .bar-chart { display:flex; align-items:flex-end; gap: 10px; height: 140px; padding: 0 4px; }
+        .bar-col { flex:1; display:flex; flex-direction:column; align-items:center; height:100%; justify-content:flex-end; }
+        .bar-value { font-family: var(--mono); font-size: 10px; color: var(--text-mute); margin-bottom: 4px; white-space:nowrap; }
+        .bar-track { width: 100%; max-width: 34px; flex:1; display:flex; align-items:flex-end; background: var(--card-alt); border: 1px solid var(--line-soft); border-bottom: none; overflow:hidden; }
+        .bar-fill { width:100%; background: var(--accent); transition: height 0.4s ease; min-height: 2px; }
+        .bar-label { font-family: var(--mono); font-size: 10px; color: var(--text-mute); margin-top: 6px; }
+        .report-table { width:100%; border-collapse: collapse; font-size: 12.5px; }
+        .report-table th { text-align:left; font-family: var(--mono); font-size: 10px; text-transform:uppercase; letter-spacing:0.4px; color:var(--text-mute); padding: 6px 8px; border-bottom: 1.5px solid var(--ink); position: sticky; top:0; background: var(--card); }
+        .report-table td { padding: 7px 8px; border-bottom: 1px solid var(--line-soft); }
+        .report-table td.mono, .report-table th:not(:first-child) { text-align:right; }
+
+        /* ---- Mobile polish ---- */
+        @media (max-width: 600px) {
+          .field input, .field select { font-size: 16px; } /* prevents iOS Safari auto-zoom-on-focus */
+          .icon-btn { width: 34px; height: 34px; }
+          .checkbox { width: 19px; height: 19px; }
+          .row { grid-template-columns: 18px 32px 1fr; row-gap: 10px; padding: 12px; }
+          .row-right { grid-column: 1 / -1; justify-content: space-between; padding-left: 44px; flex-wrap: wrap; row-gap: 8px; }
+          .row-actions { flex-wrap: wrap; justify-content: flex-end; }
+          .amt-sub { display: none; }
+          .toolbar-card .btn span, .toolbar-card .btn { font-size: 12.5px; padding: 8px 10px; }
+          .header { padding: 18px 16px 16px; }
+          .stats-row { grid-template-columns: repeat(2, 1fr); }
+          .modal { padding: 16px; max-height: 92vh; }
+          .field-row { grid-template-columns: 1fr; }
+          .bar-chart { gap: 6px; }
+        }
+      `}</style>
+
+      <div className="header">
+        <div className="header-top">
+          <div className="brand">
+            <div className="brand-mark">FL</div>
+            <div>
+              <div className="brand-title">Fee Ledger</div>
+              <div className="brand-sub">{user.email}</div>
+            </div>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {allowedSchools.length > 1 && (
+              <div className="dropdown-wrap" ref={schoolMenuRef}>
+                <button className="dropdown-trigger" onClick={() => setSchoolMenuOpen((o) => !o)}>
+                  <span>{schoolFilter}</span>
+                  <ChevronDown size={14} style={{ transform: schoolMenuOpen ? "rotate(180deg)" : "none", transition: "transform 0.15s ease" }} />
+                </button>
+                {schoolMenuOpen && (
+                  <div className="dropdown-menu">
+                    {["All Schools", ...allowedSchools].map((opt) => (
+                      <button
+                        key={opt}
+                        className={`dropdown-item ${schoolFilter === opt ? "active" : ""}`}
+                        onClick={() => { setSchoolFilter(opt); setSchoolMenuOpen(false); }}
+                      >
+                        {opt}
+                        {schoolFilter === opt && <Check size={14} />}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+            <button onClick={() => setDarkMode((d) => !d)} title={darkMode ? "Switch to light mode" : "Switch to dark mode"} className="icon-plain theme-toggle">
+              {darkMode ? <Sun size={16} /> : <Moon size={16} />}
+            </button>
+            <div className="user-chip">
+              {user.picture && <img src={user.picture} alt="" />}
+              <button onClick={onLogout} title="Sign out" className="icon-plain">
+                <LogOut size={15} />
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="segmented view-tabs">
+          <button className={view === "ledger" ? "active" : ""} onClick={() => setView("ledger")}>Fee Ledger</button>
+          <button className={view === "expenses" ? "active" : ""} onClick={() => setView("expenses")}>Expenses</button>
+        </div>
+
+        {view === "ledger" ? (
+          <>
+            {!isCollector && (
+              <>
+                <div className="meter-row">
+                  <span className="meter-label">Collected</span>
+                  <div className="meter-track">
+                    <div className="meter-fill" style={{ width: `${collectionPct}%` }} />
+                  </div>
+                  <span className="meter-pct mono">{collectionPct}%</span>
+                </div>
+
+                <div className="stats-row">
+                  <div className="stat-card"><div className="stat-label">Students</div><div className="stat-value">{stats.count}</div></div>
+                  <div className="stat-card"><div className="stat-label">Collected</div><div className="stat-value">{money(stats.collected)}</div></div>
+                  <div className="stat-card"><div className="stat-label">Balance due</div><div className="stat-value amber">{money(stats.totalDue)}</div></div>
+                  <div className="stat-card"><div className="stat-label">Overdue</div><div className="stat-value red">{stats.overdue}</div></div>
+                  <div className="stat-card wide"><div className="stat-label">Collected this month</div><div className="stat-value">{money(thisMonthCollected)}</div></div>
+                </div>
+
+                {(stats.transportDue > 0 || stats.transportCollected > 0) && (
+                  <div className="stats-row">
+                    <div className="stat-card"><div className="stat-label">Transport collected</div><div className="stat-value">{money(stats.transportCollected)}</div></div>
+                    <div className="stat-card"><div className="stat-label">Transport due</div><div className="stat-value amber">{money(stats.transportDue)}</div></div>
+                  </div>
+                )}
+
+                {stats.previousSessionDue > 0 && (
+                  <div className="stats-row">
+                    <div className="stat-card"><div className="stat-label">Previous session due</div><div className="stat-value red">{money(stats.previousSessionDue)}</div></div>
+                  </div>
+                )}
+              </>
+            )}
+          </>
+        ) : (
+          !isCollector && (
+            <div className="stats-row">
+              <div className="stat-card"><div className="stat-label">Total spent</div><div className="stat-value">{money(expenseStats.totalSpent)}</div></div>
+              <div className="stat-card"><div className="stat-label">Spent this month</div><div className="stat-value">{money(expenseStats.spentThisMonth)}</div></div>
+              <div className="stat-card"><div className="stat-label">Net this month</div><div className={`stat-value ${expenseStats.netThisMonth < 0 ? "red" : ""}`}>{money(expenseStats.netThisMonth)}</div></div>
+              <div className="stat-card"><div className="stat-label">Categories</div><div className="stat-value">{expenseStats.categories}</div></div>
+            </div>
+          )
+        )}
+      </div>
+
+      {view === "ledger" ? (
+        <>
+          {!isCollector && (
+            <div className="note-banner">
+              Tap a green WhatsApp icon to open a pre-filled reminder — one tap per parent. Signed in as {user.email}, stored on your own server.
+            </div>
+          )}
+
+          {!isCollector && (digest.dueSoon.length > 0 || digest.overdue.length > 0) && (
+            <div className="digest-banner">
+              <div className="digest-text">
+                <strong>Today:</strong>{" "}
+                {digest.overdue.length > 0 && <span>{digest.overdue.length} overdue</span>}
+                {digest.overdue.length > 0 && digest.dueSoon.length > 0 && " · "}
+                {digest.dueSoon.length > 0 && <span>{digest.dueSoon.length} due within 3 days</span>}
+                {digest.needsReminderList.length > 0 && <span> · {digest.needsReminderList.length} not reminded in the last 7 days</span>}
+              </div>
+              {digest.needsReminderList.length > 0 && (
+                <button
+                  className="btn btn-whatsapp"
+                  onClick={() => { setSelected(new Set(digest.needsReminderList.map((s) => s.id))); setShowReminderPanel(true); }}
+                >
+                  <MessageCircle size={14} /> Remind {digest.needsReminderList.length}
+                </button>
+              )}
+            </div>
+          )}
+
+          <div className="toolbar">
+            <div className="toolbar-card">
+              <div className="search-box">
+                <Search size={16} color="var(--text-mute)" />
+                <input placeholder="Search student..." value={query} onChange={(e) => setQuery(e.target.value)} />
+              </div>
+              <div className="segmented">
+                {[["all", "All"], ["pending", "Due"], ["overdue", "Overdue"], ["paid", "Paid"]].map(([val, label]) => (
+                  <button key={val} className={statusFilter === val ? "active" : ""} onClick={() => setStatusFilter(val)}>{label}</button>
+                ))}
+              </div>
+              {availableClasses.length > 2 && (
+                <Dropdown
+                  value={classFilter}
+                  onChange={setClassFilter}
+                  options={availableClasses.map((c) => ({ value: c, label: c === "All Classes" ? "All classes" : c }))}
+                />
+              )}
+              <Dropdown
+                value={planFilter}
+                onChange={setPlanFilter}
+                options={[{ value: "all", label: "All plans" }, ...PLAN_SELECT_OPTIONS.map((p) => ({ value: p.value, label: p.label }))]}
+              />
+              <Dropdown
+                value={sortBy}
+                onChange={setSortBy}
+                options={[
+                  { value: "name", label: "Sort: Name" },
+                  { value: "overdue", label: "Sort: Most overdue" },
+                  { value: "balance", label: "Sort: Highest balance" },
+                ]}
+              />
+              {students.some((s) => s.transportRate > 0) && (
+                <button
+                  type="button"
+                  className={transportOnly ? "btn btn-primary" : "btn btn-ghost"}
+                  onClick={() => setTransportOnly((v) => !v)}
+                  title="Show only students opted into transport"
+                >
+                  <Bus size={15} /> Transport
+                </button>
+              )}
+              {!isCollector && (
+                <>
+                  <button className="btn btn-ghost" onClick={() => exportLedger(students)}><Download size={15} /> Export</button>
+                  <button className="btn btn-ghost" onClick={() => setShowReports(true)}><BarChart3 size={15} /> Reports</button>
+                  <button className="btn btn-ghost" onClick={() => setShowHistory(true)}><History size={15} /> History</button>
+                  <button className="btn btn-ghost" onClick={() => setShowBackup(true)}><DatabaseBackup size={15} /> Backup</button>
+                  <button className="btn btn-whatsapp" onClick={() => { selectAllUnpaid(); setShowReminderPanel(true); }}><MessageCircle size={15} /> Send Reminders</button>
+                  <button className="btn btn-ghost" onClick={() => setShowImport(true)}><FileSpreadsheet size={15} /> Import Excel</button>
+                  <button className="btn btn-primary" onClick={() => setShowAdd(true)}><Plus size={15} /> Add Student</button>
+                </>
+              )}            </div>
+          </div>
+
+          <div className="content">
+            <div className="section-label">
+              <span>Fee ledger — {filtered.length} record{filtered.length !== 1 ? "s" : ""}</span>
+            </div>
+            <div className="ledger">
+              {filtered.length === 0 && (
+                <div className="empty">
+                  <div className="empty-title">{students.length === 0 ? "No students yet" : "No matches"}</div>
+                  <div className="empty-body">
+                    {students.length === 0 ? "Add a student or import a spreadsheet to start the ledger." : "Try a different search, filter, or status."}
+                  </div>
+                </div>
+              )}
+              {filtered.map((s) => {
+                const balance = s.total - s.paid;
+                const pct = s.total > 0 ? Math.min(100, Math.round((s.paid / s.total) * 100)) : 0;
+                const meta = STATUS_META[s.status];
+                const installment = isInstallmentPlan(s);
+                const paidCount = installment ? (s.installments || []).filter((i) => i.paid).length : 0;
+                const totalCount = installment ? (s.installments || []).length : 0;
+                const transport = s.transportRate > 0 ? transportComputed(s) : null;
+                return (
+                  <div className="row" key={s.id}>
+                    {isCollector ? (
+                      <div />
+                    ) : (
+                      <input type="checkbox" className="checkbox" checked={selected.has(s.id)} onChange={() => toggleSelect(s.id)} disabled={s.status === "paid"} />
+                    )}
+                    <div className="avatar" style={{ background: meta.bg, color: meta.color }}>{initials(s.name)}</div>
+                    <div>
+                      <div className="row-name">{s.name}</div>
+                      <div className="row-sub">
+                        {s.cls} · {s.school} · Due {formatDate(s.due)}
+                        {s.status === "overdue" && <span style={{ color: "var(--over)", fontWeight: 600 }}> · {s.daysOverdue}d overdue</span>}
+                        {duplicateNames.has(normName(s.name)) && s.fatherName && <span> · Father: {s.fatherName}</span>}
+                      </div>
+                      {installment && (
+                        <span className="plan-chip">{planLabel(s)} · {paidCount}/{totalCount} paid</span>
+                      )}
+                      {transport && transport.balance > 0 && (
+                        <span className="plan-chip" style={{ marginLeft: installment ? 6 : 0, color: "var(--over)", borderColor: "var(--over)" }}>
+                          <Bus size={11} style={{ verticalAlign: -2, marginRight: 3 }} />Transport {money(transport.balance)} due
+                        </span>
+                      )}
+                      {s.previousSessionDue > 0 && (
+                        <span className="plan-chip" style={{ marginLeft: installment || (transport && transport.balance > 0) ? 6 : 0, color: "var(--over)", borderColor: "var(--over)" }}>
+                          <Clock size={11} style={{ verticalAlign: -2, marginRight: 3 }} />Previous session {money(s.previousSessionDue)} due
+                        </span>
+                      )}
+                      <div className="progress-track"><div className="progress-fill" style={{ width: `${pct}%`, background: meta.color }} /></div>
+                    </div>
+                    <div className="row-right">
+                      <div className="amounts clickable" onClick={() => (installment ? setScheduleStudentId(s.id) : setHistoryStudent(s))}>
+                        <div className="amt-balance">{balance > 0 ? money(balance) : "Paid"}</div>
+                        <div className="amt-sub">of {money(s.total)}</div>
+                      </div>
+                      <StampBadge status={s.status} />
+                      <div className="row-actions">
+                        {balance > 0 && s.phone && (
+                          <a className="icon-btn" title="Send WhatsApp now" href={waLink(s.phone, defaultTemplate(s))} target="_blank" rel="noreferrer" onClick={() => logSingleReminder(s)}>
+                            <MessageCircle size={14} />
+                          </a>
+                        )}
+                        {balance > 0 && (
+                          <button className="icon-btn" title={installment ? "View schedule" : "Record payment"} onClick={() => (installment ? setScheduleStudentId(s.id) : setPayModal(s))}>
+                            <IndianRupee size={14} />
+                          </button>
+                        )}
+                        {s.transportRate > 0 && (
+                          <button className="icon-btn" title="Transport" onClick={() => setTransportStudentId(s.id)}>
+                            <Bus size={14} />
+                          </button>
+                        )}
+                        {s.previousSessionDue > 0 && (
+                          <button className="icon-btn" title="Previous session dues" onClick={() => setPreviousSessionStudentId(s.id)} style={{ color: "var(--over)" }}>
+                            <Clock size={14} />
+                          </button>
+                        )}
+                        <button className="icon-btn" title="Payment history" onClick={() => setHistoryStudent(s)}>
+                          <History size={14} />
+                        </button>
+                        {!isCollector && (
+                          <>
+                            <button className="icon-btn" title="Edit" onClick={() => openEdit(s)}><Pencil size={14} /></button>
+                            <button className="icon-btn" title="Remove" onClick={() => removeStudent(s.id)}><Trash2 size={14} /></button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </>
+      ) : (
+        <>
+          {!isCollector && (
+            <div className="note-banner">
+              Track school spending alongside fee collection — see the "Net this month" figure above for collected minus spent.
+            </div>
+          )}
+
+          <div className="toolbar">
+            <div className="toolbar-card">
+              <div className="search-box">
+                <Search size={16} color="var(--text-mute)" />
+                <input placeholder="Search expenses..." value={expenseQuery} onChange={(e) => setExpenseQuery(e.target.value)} />
+              </div>
+              {availableExpenseCategories.length > 2 && (
+                <Dropdown
+                  value={expenseCategoryFilter}
+                  onChange={setExpenseCategoryFilter}
+                  options={availableExpenseCategories.map((c) => ({ value: c, label: c === "All Categories" ? "All categories" : c }))}
+                />
+              )}
+              <Dropdown
+                value={expenseSortBy}
+                onChange={setExpenseSortBy}
+                options={[
+                  { value: "date", label: "Sort: Date" },
+                  { value: "amount", label: "Sort: Highest amount" },
+                  { value: "category", label: "Sort: Category" },
+                ]}
+              />
+              {!isCollector && <button className="btn btn-ghost" onClick={() => exportExpenses(filteredExpenses)}><Download size={15} /> Export</button>}
+              <button className="btn btn-primary" onClick={() => setShowAddExpense(true)}><Plus size={15} /> Add Expense</button>
+            </div>
+          </div>
+
+          <div className="content">
+            <div className="section-label">
+              <span>Expenses — {filteredExpenses.length} record{filteredExpenses.length !== 1 ? "s" : ""}</span>
+            </div>
+            <div className="ledger">
+              {filteredExpenses.length === 0 && (
+                <div className="empty">
+                  <div className="empty-title">{expenses.length === 0 ? "No expenses yet" : "No matches"}</div>
+                  <div className="empty-body">
+                    {expenses.length === 0 ? "Add an expense to start tracking school spending." : "Try a different search or category."}
+                  </div>
+                </div>
+              )}
+              {filteredExpenses.map((e) => {
+                const createdEntry = (e.history || []).find((h) => h.field === "created");
+                return (
+                <div className="row" key={e.id} style={{ gridTemplateColumns: "36px 1fr auto" }}>
+                  <div className="avatar" style={{ background: "var(--accent-tint)", color: "var(--accent)" }}>{initials(e.category)}</div>
+                  <div>
+                    <div className="row-name">{e.category}</div>
+                    <div className="row-sub">
+                      {e.description || "—"}{e.vendor && ` · ${e.vendor}`} · {e.school} · {formatDate(e.date)}
+                    </div>
+                    {createdEntry && (
+                      <div style={{ fontSize: 11, color: "var(--text-mute)", marginTop: 2 }}>
+                        Added by {createdEntry.by || "—"} · {formatDateTime(createdEntry.at)}
+                      </div>
+                    )}
+                  </div>
+                  <div className="row-right">
+                    <div className="amounts clickable" onClick={() => setHistoryExpense(e)}>
+                      <div className="amt-balance">{money(e.amount)}</div>
+                    </div>
+                    <div className="row-actions">
+                      {!isCollector && (
+                        <>
+                          <button className="icon-btn" title="Edit" onClick={() => openEditExpense(e)}><Pencil size={14} /></button>
+                          <button className="icon-btn" title="Remove" onClick={() => removeExpense(e.id)}><Trash2 size={14} /></button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </div>
+                );
+              })}
+            </div>
+          </div>
+        </>
+      )}
+
+      {showAdd && (
+        <div className="modal-backdrop" onClick={() => { setShowAdd(false); setEditingId(null); }}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head">
+              <div className="modal-title">{editingId ? "Edit student" : "Add student"}</div>
+              <button className="icon-btn" onClick={() => { setShowAdd(false); setEditingId(null); }}><X size={16} /></button>
+            </div>
+            <div className="field"><label>Student name</label><input value={newStudent.name} onChange={(e) => setNewStudent({ ...newStudent, name: e.target.value })} /></div>
+            <div className="field-row">
+              <div className="field"><label>Class</label><input value={newStudent.cls} onChange={(e) => setNewStudent({ ...newStudent, cls: e.target.value })} /></div>
+              <div className="field"><label>School</label><select value={newStudent.school} onChange={(e) => setNewStudent({ ...newStudent, school: e.target.value })}>{allowedSchools.map((s) => <option key={s}>{s}</option>)}</select></div>
+            </div>
+            <div className="field"><label>Parent WhatsApp number</label><input value={newStudent.phone} onChange={(e) => setNewStudent({ ...newStudent, phone: e.target.value })} placeholder="98XXXXXXXX" /></div>
+            <div className="field"><label>Father's name</label><input value={newStudent.fatherName} onChange={(e) => setNewStudent({ ...newStudent, fatherName: e.target.value })} placeholder="Helps tell apart two students with the same name" /></div>
+            <div className="field">
+              <label>Transport rate (₹/month, optional)</label>
+              <input type="number" value={newStudent.transportRate} onChange={(e) => setNewStudent({ ...newStudent, transportRate: e.target.value })} placeholder="Leave blank if this student doesn't use transport" />
+            </div>
+            <div className="field">
+              <label>Annual fee (₹/year, optional)</label>
+              <input type="number" value={newStudent.annualFeeAmount} onChange={(e) => setNewStudent({ ...newStudent, annualFeeAmount: e.target.value })} placeholder="Leave blank if this student has no Annual Fee" />
+            </div>
+            <div className="field">
+              <label>Payment plan</label>
+              <select value={newStudent.planSelect} onChange={(e) => setNewStudent({ ...newStudent, planSelect: e.target.value })}>
+                {PLAN_SELECT_OPTIONS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
+              </select>
+            </div>
+            {newStudent.planSelect === "full" ? (
+              <>
+                <div className="field-row">
+                  <div className="field"><label>Total fee (₹)</label><input type="number" value={newStudent.total} onChange={(e) => setNewStudent({ ...newStudent, total: e.target.value })} /></div>
+                  <div className="field"><label>Already paid (₹)</label><input type="number" value={newStudent.paid} onChange={(e) => setNewStudent({ ...newStudent, paid: e.target.value })} /></div>
+                </div>
+                <div className="field"><label>Due date</label><input type="date" value={newStudent.due} onChange={(e) => setNewStudent({ ...newStudent, due: e.target.value })} /></div>
+              </>
+            ) : (
+              <>
+                <div className="field">
+                  <label>{newStudent.planSelect === "monthly" ? "Monthly amount (₹)" : "Quarterly/Biannual amount (₹)"}</label>
+                  <input type="number" value={newStudent.installmentAmount} onChange={(e) => setNewStudent({ ...newStudent, installmentAmount: e.target.value })} />
+                </div>
+                <div className="field"><label>First installment due date</label><input type="date" value={newStudent.due} onChange={(e) => setNewStudent({ ...newStudent, due: e.target.value })} /></div>
+                {editingId && <p style={{ fontSize: 12, color: "var(--text-mute)", marginTop: -4, marginBottom: 12 }}>Changing the plan type, amount, or start date here rebuilds the payment schedule and clears paid marks. Other edits (name, class, phone) leave the schedule untouched.</p>}
+              </>
+            )}
+            <button className="btn btn-primary" style={{ width: "100%", justifyContent: "center", opacity: savingStudent ? 0.6 : 1 }} disabled={savingStudent} onClick={saveStudent}>{savingStudent ? "Saving…" : editingId ? "Save changes" : "Add to ledger"}</button>
+          </div>
+        </div>
+      )}
+
+      {showAddExpense && (
+        <div className="modal-backdrop" onClick={() => { setShowAddExpense(false); setEditingExpenseId(null); }}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head">
+              <div className="modal-title">{editingExpenseId ? "Edit expense" : "Add expense"}</div>
+              <button className="icon-btn" onClick={() => { setShowAddExpense(false); setEditingExpenseId(null); }}><X size={16} /></button>
+            </div>
+            <div className="field"><label>School</label><select value={newExpense.school} onChange={(e) => setNewExpense({ ...newExpense, school: e.target.value })}>{allowedSchools.map((s) => <option key={s}>{s}</option>)}</select></div>
+            <div className="field-row">
+              <div className="field">
+                <label>Category</label>
+                <input list="expense-categories" value={newExpense.category} onChange={(e) => setNewExpense({ ...newExpense, category: e.target.value })} placeholder="e.g. Maintenance" />
+                <datalist id="expense-categories">{EXPENSE_CATEGORIES.map((c) => <option key={c} value={c} />)}</datalist>
+              </div>
+              <div className="field"><label>Amount (₹)</label><input type="number" value={newExpense.amount} onChange={(e) => setNewExpense({ ...newExpense, amount: e.target.value })} /></div>
+            </div>
+            <div className="field"><label>Description</label><input value={newExpense.description} onChange={(e) => setNewExpense({ ...newExpense, description: e.target.value })} placeholder="What was this for?" /></div>
+            <div className="field-row">
+              <div className="field"><label>Paid to (optional)</label><input value={newExpense.vendor} onChange={(e) => setNewExpense({ ...newExpense, vendor: e.target.value })} placeholder="Vendor / person" /></div>
+              <div className="field"><label>Date</label><input type="date" max={todayISO()} value={newExpense.date} onChange={(e) => setNewExpense({ ...newExpense, date: e.target.value })} /></div>
+            </div>
+            <button className="btn btn-primary" style={{ width: "100%", justifyContent: "center", opacity: savingExpense ? 0.6 : 1 }} disabled={savingExpense} onClick={saveExpense}>{savingExpense ? "Saving…" : editingExpenseId ? "Save changes" : "Add expense"}</button>
+          </div>
+        </div>
+      )}
+
+      {historyExpense && (
+        <div className="modal-backdrop" onClick={() => setHistoryExpense(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 420 }}>
+            <div className="modal-head"><div className="modal-title">Expense details</div><button className="icon-btn" onClick={() => setHistoryExpense(null)}><X size={16} /></button></div>
+            <p style={{ fontSize: 13, color: "var(--text-soft)", marginBottom: 4 }}>{historyExpense.category} · {money(historyExpense.amount)}</p>
+            <p style={{ fontSize: 12.5, color: "var(--text-mute)", marginBottom: 16 }}>{historyExpense.description || "No description"}{historyExpense.vendor && ` · Paid to ${historyExpense.vendor}`} · {historyExpense.school} · {formatDate(historyExpense.date)}</p>
+            {(historyExpense.history || []).filter((h) => h.field !== "created").length > 0 ? (
+              <>
+                <div className="report-section-label">Changes</div>
+                {historyExpense.history.filter((h) => h.field !== "created").slice().reverse().map((h, i) => (
+                  <div className="history-item" key={i}>
+                    <div className="history-top">
+                      <span>{h.field}: <span className="mono">{String(h.oldValue ?? "—")}</span> → <span className="mono">{String(h.newValue ?? "—")}</span></span>
+                      <span className="history-time">{formatDateTime(h.at)}</span>
+                    </div>
+                    <div style={{ fontSize: 11.5, color: "var(--text-mute)", marginTop: 2 }}>by {h.by}</div>
+                  </div>
+                ))}
+              </>
+            ) : (
+              <p style={{ fontSize: 12.5, color: "var(--text-mute)" }}>No edits logged yet.</p>
+            )}
+          </div>
+        </div>
+      )}
+
+      {showImport && (
+        <div className="modal-backdrop" onClick={() => { setShowImport(false); setImportRows(null); }}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head"><div className="modal-title">Import from Excel</div><button className="icon-btn" onClick={() => { setShowImport(false); setImportRows(null); }}><X size={16} /></button></div>
+            {!importRows && (
+              <>
+                <p style={{ fontSize: 13, color: "var(--text-soft)", marginBottom: 12 }}>
+                  Columns: <strong>Name, Class, School, Parent Phone, Total Fee, Paid, Due Date</strong>, plus <strong>Quarterly Amount</strong>, <strong>Biannual Amount</strong>, or <strong>Monthly Amount</strong> for an installment plan (leave Total Fee blank if using one of these — it's calculated automatically). <strong>Father's Name</strong> and <strong>Transport Rate</strong> are optional.
+                </p>
+                <button className="btn btn-ghost" style={{ width: "100%", justifyContent: "center", marginBottom: 10 }} onClick={downloadTemplate}><Download size={15} /> Download template</button>
+                <label className="btn btn-primary" style={{ width: "100%", justifyContent: "center", cursor: "pointer" }}>
+                  <Upload size={15} /> Choose file
+                  <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: "none" }} onChange={handleFileSelect} />
+                </label>
+              </>
+            )}
+            {importRows && (
+              <>
+                <p style={{ fontSize: 13, marginBottom: 10 }}>Found {importRows.length} rows in {importFileName}.</p>
+                {importRows.some((r) => r.duplicate) && (
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: "var(--text-soft)", marginBottom: 10, cursor: "pointer" }}>
+                    <input type="checkbox" className="checkbox" checked={skipDuplicates} onChange={(e) => setSkipDuplicates(e.target.checked)} />
+                    Skip rows that match an existing student (same name, class, school)
+                  </label>
+                )}
+                <div style={{ maxHeight: 320, overflow: "auto", marginBottom: 12 }}>
+                  {importRows.map((r) => (
+                    <div key={r.id} className="reminder-item" style={{ background: r.errors.length ? "rgba(255,59,48,0.12)" : (r.duplicate || r.suspiciousTransportRate) ? "rgba(255,149,0,0.14)" : "#fff" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, fontWeight: 600 }}><span>Row {r.rowNum}: {r.name || "(no name)"}</span><span className="mono">{money(r.total)}</span></div>
+                      <div style={{ fontSize: 12, color: "var(--text-mute)" }}>{r.cls} · {r.school} · Due {r.due ? formatDate(r.due) : "—"}</div>
+                      {r.errors.length > 0 && <div style={{ fontSize: 11.5, color: "var(--over)", marginTop: 4 }}><AlertCircle size={12} style={{ verticalAlign: "middle" }} /> {r.errors.join(" · ")}</div>}
+                      {r.duplicate && r.errors.length === 0 && (
+                        <div style={{ fontSize: 11.5, color: "var(--due)", marginTop: 4 }}><AlertCircle size={12} style={{ verticalAlign: "middle" }} /> Looks like an existing student{skipDuplicates ? " — will be skipped" : ""}</div>
+                      )}
+                      {r.suspiciousTransportRate && r.errors.length === 0 && (
+                        <div style={{ fontSize: 11.5, color: "var(--due)", marginTop: 4 }}><AlertCircle size={12} style={{ verticalAlign: "middle" }} /> Transport rate ({money(r.transportRate)}) looks too high next to the total fee — check the Transport Rate and Total Fee columns aren't swapped</div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button className="btn btn-ghost" style={{ flex: 1, justifyContent: "center" }} onClick={() => setImportRows(null)}>Choose different file</button>
+                  <button className="btn btn-primary" style={{ flex: 1, justifyContent: "center" }} onClick={confirmImport}><Check size={15} /> Import valid rows</button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {historyStudent && (
+        <div className="modal-backdrop" onClick={() => setHistoryStudent(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 420 }}>
+            <div className="modal-head"><div className="modal-title">Payment history</div><button className="icon-btn" onClick={() => setHistoryStudent(null)}><X size={16} /></button></div>
+            <p style={{ fontSize: 13, color: "var(--text-soft)", marginBottom: 12 }}>{historyStudent.name} · {money(historyStudent.paid)} paid of {money(historyStudent.total)}</p>
+            {(historyStudent.payments || []).slice().reverse().map((p, i) => (
+              <div className="history-item" key={i}><div className="history-top"><span className="mono">{money(p.amount)}</span><span className="history-time">{formatDateTime(p.date)}</span></div>{(p.method || p.by) && <div style={{ fontSize: 11.5, color: "var(--text-mute)" }}>{p.method ? (p.method === "upi_bank" ? "UPI / Bank" : "Cash") : ""}{p.method && p.by ? " · " : ""}{p.by ? `Collected by ${p.by}` : ""}</div>}</div>
+            ))}
+            {(historyStudent.payments || []).length === 0 && <p style={{ fontSize: 12.5, color: "var(--text-mute)" }}>No payments logged yet.</p>}
+
+            {(historyStudent.history || []).filter((h) => h.field !== "created").length > 0 && (
+              <>
+                <div className="report-section-label" style={{ marginTop: 18 }}>Changes</div>
+                {historyStudent.history.filter((h) => h.field !== "created").slice().reverse().map((h, i) => (
+                  <div className="history-item" key={i}>
+                    <div className="history-top">
+                      <span>{h.field}: <span className="mono">{String(h.oldValue ?? "—")}</span> → <span className="mono">{String(h.newValue ?? "—")}</span></span>
+                      <span className="history-time">{formatDateTime(h.at)}</span>
+                    </div>
+                    <div style={{ fontSize: 11.5, color: "var(--text-mute)", marginTop: 2 }}>by {h.by}</div>
+                  </div>
+                ))}
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {payModal && (
+        <div className="modal-backdrop" onClick={() => setPayModal(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 380 }}>
+            <div className="modal-head"><div className="modal-title">Record payment</div><button className="icon-btn" onClick={() => setPayModal(null)}><X size={16} /></button></div>
+            <p style={{ fontSize: 13, marginBottom: 12 }}>{payModal.name} owes <strong>{money(payModal.total - payModal.paid)}</strong>.</p>
+            <PaymentForm student={payModal} onSubmit={(amt, method) => recordPayment(payModal.id, amt, method)} />
+          </div>
+        </div>
+      )}
+
+      {scheduleStudent && (
+        <div className="modal-backdrop" onClick={() => setScheduleStudentId(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 440 }}>
+            <div className="modal-head">
+              <div className="modal-title">Payment schedule</div>
+              <button className="icon-btn" onClick={() => setScheduleStudentId(null)}><X size={16} /></button>
+            </div>
+            <p style={{ fontSize: 13, color: "var(--text-soft)", marginBottom: 4 }}>
+              {scheduleStudent.name} · {planLabel(scheduleStudent)}
+            </p>
+            <p style={{ fontSize: 13, marginBottom: 12 }}>
+              <strong>{money(scheduleStudent.paid)}</strong> paid of {money(scheduleStudent.total)}
+            </p>
+            <div style={{ maxHeight: 340, overflow: "auto", marginBottom: 12 }}>
+              {(scheduleStudent.installments || []).map((inst) => (
+                <div key={inst.period} className="reminder-item" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                  <div>
+                    <div style={{ fontWeight: 600, fontSize: 13.5 }}>{inst.period}</div>
+                    <div style={{ fontSize: 12, color: "var(--text-mute)" }}>
+                      {money(inst.amount)} · Due {formatDate(inst.due)}
+                      {inst.paid && inst.paidDate && (
+                        <span> · Paid {formatDateTime(inst.paidDate)}{inst.paidBy && ` by ${inst.paidBy}`}</span>
+                      )}
+                    </div>
+                  </div>
+                  {inst.paid ? (
+                    <span className="stamp" style={{ color: STAMP_META.paid.color, borderColor: STAMP_META.paid.border, background: STAMP_META.paid.bg }}>
+                      <Check size={11} strokeWidth={2.5} /> Paid
+                    </span>
+                  ) : (
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <div style={{ display: "flex", border: "1px solid var(--border)", borderRadius: 6, overflow: "hidden" }}>
+                        <button
+                          type="button"
+                          className="btn btn-ghost"
+                          style={{
+                            padding: "4px 8px", fontSize: 11.5, borderRadius: 0,
+                            background: (scheduleMethodByPeriod[inst.period] || "cash") === "cash" ? "var(--highlight)" : "transparent",
+                          }}
+                          onClick={() => setScheduleMethodByPeriod((prev) => ({ ...prev, [inst.period]: "cash" }))}
+                        >
+                          Cash
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-ghost"
+                          style={{
+                            padding: "4px 8px", fontSize: 11.5, borderRadius: 0,
+                            background: scheduleMethodByPeriod[inst.period] === "upi_bank" ? "var(--highlight)" : "transparent",
+                          }}
+                          onClick={() => setScheduleMethodByPeriod((prev) => ({ ...prev, [inst.period]: "upi_bank" }))}
+                        >
+                          UPI / Bank
+                        </button>
+                      </div>
+                      <button className="btn btn-primary" onClick={() => markInstallmentPaid(scheduleStudent.id, inst.period, scheduleMethodByPeriod[inst.period] || "cash")}>
+                        <Check size={14} /> Mark paid
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+            {!isCollector && (
+              <button className="btn btn-ghost" style={{ width: "100%", justifyContent: "center" }} onClick={() => regenerateSchedule(scheduleStudent.id)}>
+                Regenerate schedule
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {transportStudent && (() => {
+        const chargeable = currentAcademicYearTransportMonths();
+        const juneKey = `${chargeable[0].split("-")[0]}-06`;
+        const allMonths = [...chargeable.slice(0, 2), juneKey, ...chargeable.slice(2)];
+        const computed = transportComputed(transportStudent);
+        return (
+          <div className="modal-backdrop" onClick={() => setTransportStudentId(null)}>
+            <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 440 }}>
+              <div className="modal-head">
+                <div className="modal-title">Transport</div>
+                <button className="icon-btn" onClick={() => setTransportStudentId(null)}><X size={16} /></button>
+              </div>
+              <p style={{ fontSize: 13, color: "var(--text-soft)", marginBottom: 4 }}>
+                {transportStudent.name} · {money(transportStudent.transportRate)}/month
+              </p>
+              <p style={{ fontSize: 13, marginBottom: 12 }}>
+                <strong>{money(computed.paid)}</strong> paid of {money(computed.total)}
+                {computed.balance > 0 && <span style={{ color: "var(--over)" }}> · {money(computed.balance)} due</span>}
+              </p>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
+                {allMonths.map((key) => {
+                  const isJune = key === juneKey;
+                  const active = !isJune && (transportStudent.transportMonths || []).includes(key);
+                  const locked = isCollector && active; // collector can opt a month IN but not remove one already opted in
+                  return (
+                    <button
+                      key={key}
+                      type="button"
+                      disabled={isJune || locked}
+                      onClick={() => toggleTransportMonth(transportStudent.id, key, !active)}
+                      className={active ? "btn btn-primary" : "btn btn-ghost"}
+                      style={{
+                        padding: "6px 10px", fontSize: 12.5,
+                        opacity: isJune ? 0.5 : 1,
+                        cursor: isJune || locked ? "default" : "pointer",
+                      }}
+                      title={
+                        isJune ? "No transport charge in June (summer vacation)"
+                        : locked ? "Only an admin can remove a transport month once it's been added"
+                        : active ? "Opted in — tap to remove"
+                        : "Tap to opt in"
+                      }
+                    >
+                      {monthLabel(key)}{isJune && " · Summer"}{locked && " 🔒"}
+                    </button>
+                  );
+                })}
+              </div>
+              {computed.balance > 0 && (
+                <div style={{ marginBottom: 16, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+                  <PaymentForm student={{ total: computed.total, paid: computed.paid }} onSubmit={(amt, method) => recordTransportPayment(transportStudent.id, amt, method)} />
+                </div>
+              )}
+              {(transportStudent.transportPayments || []).length > 0 && (
+                <div style={{ maxHeight: 180, overflow: "auto", paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+                  {[...(transportStudent.transportPayments || [])].reverse().map((p, i) => (
+                    <div className="history-item" key={i}>
+                      <div className="history-top"><span className="mono">{money(p.amount)}</span><span className="history-time">{formatDateTime(p.date)}</span></div>
+                      {(p.method || p.by) && <div style={{ fontSize: 11.5, color: "var(--text-mute)" }}>{p.method ? (p.method === "upi_bank" ? "UPI / Bank" : "Cash") : ""}{p.method && p.by ? " · " : ""}{p.by ? `Collected by ${p.by}` : ""}</div>}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {!isCollector && (
+                <button
+                  className="btn btn-ghost"
+                  style={{ width: "100%", justifyContent: "center", marginTop: 16, paddingTop: 12, borderTop: "1px solid var(--border)" }}
+                  onClick={() => resetTransport(transportStudent.id)}
+                >
+                  Regenerate transport
+                </button>
+              )}
+            </div>
+          </div>
+        );
+      })()}
+
+      {previousSessionStudent && (
+        <div className="modal-backdrop" onClick={() => setPreviousSessionStudentId(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 440 }}>
+            <div className="modal-head">
+              <div className="modal-title">Previous session dues</div>
+              <button className="icon-btn" onClick={() => setPreviousSessionStudentId(null)}><X size={16} /></button>
+            </div>
+            <p style={{ fontSize: 13, color: "var(--text-soft)", marginBottom: 4 }}>{previousSessionStudent.name}</p>
+            <p style={{ fontSize: 13, marginBottom: 16 }}>
+              <span style={{ color: "var(--over)" }}><strong>{money(previousSessionStudent.previousSessionDue)}</strong> still due from before the current session</span>
+            </p>
+            <p style={{ fontSize: 12, color: "var(--text-mute)", marginBottom: 16 }}>
+              This is tracked separately from {previousSessionStudent.name}'s current-session balance — it's never added into "Balance due" or the current-session reminders, and shows up as its own line in messages when it's outstanding.
+            </p>
+            <div style={{ paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+              <PaymentForm
+                student={{ total: previousSessionStudent.previousSessionDue, paid: 0 }}
+                onSubmit={(amt, method) => recordPreviousSessionPayment(previousSessionStudent.id, amt, method)}
+              />
+            </div>
+            {(previousSessionStudent.previousSessionPayments || []).length > 0 && (
+              <div style={{ maxHeight: 180, overflow: "auto", paddingTop: 12, marginTop: 16, borderTop: "1px solid var(--border)" }}>
+                {[...(previousSessionStudent.previousSessionPayments || [])].reverse().map((p, i) => (
+                  <div className="history-item" key={i}>
+                    <div className="history-top"><span className="mono">{money(p.amount)}</span><span className="history-time">{formatDateTime(p.date)}</span></div>
+                    {(p.method || p.by) && <div style={{ fontSize: 11.5, color: "var(--text-mute)" }}>{p.method ? (p.method === "upi_bank" ? "UPI / Bank" : "Cash") : ""}{p.method && p.by ? " · " : ""}{p.by ? `Collected by ${p.by}` : ""}</div>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {showReminderPanel && (
+        <div className="modal-backdrop" onClick={() => setShowReminderPanel(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head"><div className="modal-title">Send WhatsApp reminders</div><button className="icon-btn" onClick={() => setShowReminderPanel(false)}><X size={16} /></button></div>
+            {unpaidSelectable.map((s) => (
+              <div className="reminder-item" key={s.id}>
+                <label>
+                  <input type="checkbox" className="checkbox" checked={selected.has(s.id)} onChange={() => toggleSelect(s.id)} />
+                  <div style={{ flex: 1 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between" }}>
+                      <div style={{ fontWeight: 600, fontSize: 13.5 }}>{s.name} <span style={{ color: "var(--text-mute)", fontWeight: 400 }}>· {s.phone || "no number"}</span></div>
+                      {s.phone && <a href={waLink(s.phone, defaultTemplate(s))} target="_blank" rel="noreferrer" onClick={(e) => { e.stopPropagation(); logSingleReminder(s); }} className="icon-btn" style={{ background: "#25D366", color: "#fff" }}><MessageCircle size={13} /></a>}
+                    </div>
+                    <div className="reminder-msg">{defaultTemplate(s)}</div>
+                  </div>
+                </label>
+              </div>
+            ))}
+            <button className="btn btn-whatsapp" style={{ width: "100%", justifyContent: "center", marginTop: 10 }} onClick={sendReminders}><Send size={15} /> Log {selected.size} as sent</button>
+          </div>
+        </div>
+      )}
+
+      {showHistory && (
+        <div className="modal-backdrop" onClick={() => setShowHistory(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head"><div className="modal-title">Reminder history</div><button className="icon-btn" onClick={() => setShowHistory(false)}><X size={16} /></button></div>
+            {reminders.map((r) => (
+              <div className="history-item" key={r.id}><div className="history-top"><span>{r.name}</span><span className="history-time">{formatDateTime(r.sentAt)}</span></div><div className="history-msg">{r.message}</div></div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {showReports && (
+        <div className="modal-backdrop" onClick={() => setShowReports(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 560 }}>
+            <div className="modal-head"><div className="modal-title">Reports</div><button className="icon-btn" onClick={() => setShowReports(false)}><X size={16} /></button></div>
+            <p style={{ fontSize: 12, color: "var(--text-mute)", marginBottom: 14 }}>Scoped to {schoolFilter}.</p>
+
+            <div className="report-section-label">Collected — last 6 months</div>
+            <div className="bar-chart">
+              {monthlySeries.map((m) => {
+                const max = Math.max(1, ...monthlySeries.map((x) => x.amount));
+                const h = Math.round((m.amount / max) * 100);
+                return (
+                  <div className="bar-col" key={m.key}>
+                    <div className="bar-value mono">{m.amount > 0 ? money(m.amount) : ""}</div>
+                    <div className="bar-track"><div className="bar-fill" style={{ height: `${h}%` }} /></div>
+                    <div className="bar-label">{m.label}</div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="report-section-label" style={{ marginTop: 18 }}>
+              {schoolFilter === "All Schools" ? "By school / class" : "By class"}
+            </div>
+            <div style={{ maxHeight: 260, overflow: "auto" }}>
+              <table className="report-table">
+                <thead><tr><th>{schoolFilter === "All Schools" ? "School · Class" : "Class"}</th><th>Students</th><th>Collected</th><th>Total fees</th></tr></thead>
+                <tbody>
+                  {classBreakdown.map((g) => (
+                    <tr key={g.key}>
+                      <td>{g.key}</td>
+                      <td className="mono">{g.count}</td>
+                      <td className="mono">{money(g.collected)}</td>
+                      <td className="mono">{money(g.total)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {expenseCategoryBreakdown.length > 0 && (
+              <>
+                <div className="report-section-label" style={{ marginTop: 18 }}>Expenses by category</div>
+                <div style={{ maxHeight: 220, overflow: "auto" }}>
+                  <table className="report-table">
+                    <thead><tr><th>Category</th><th>Count</th><th>Total spent</th></tr></thead>
+                    <tbody>
+                      {expenseCategoryBreakdown.map((g) => (
+                        <tr key={g.key}>
+                          <td>{g.key}</td>
+                          <td className="mono">{g.count}</td>
+                          <td className="mono">{money(g.total)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {showBackup && (
+        <div className="modal-backdrop" onClick={() => setShowBackup(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 420 }}>
+            <div className="modal-head"><div className="modal-title">Backup &amp; restore</div><button className="icon-btn" onClick={() => setShowBackup(false)}><X size={16} /></button></div>
+            <p style={{ fontSize: 12.5, color: "var(--text-soft)", marginBottom: 14, lineHeight: 1.5 }}>
+              A safety net in case the server's storage ever resets. Download a full backup regularly, and keep the file somewhere safe (email to yourself, Google Drive, etc).
+            </p>
+            <button className="btn btn-primary" style={{ width: "100%", justifyContent: "center", marginBottom: 10 }} onClick={downloadBackup}>
+              <Download size={15} /> Download backup (.json)
+            </button>
+            <div style={{ borderTop: "1px solid var(--line-soft)", margin: "14px 0" }} />
+            <p style={{ fontSize: 12.5, color: "var(--text-soft)", marginBottom: 10, lineHeight: 1.5 }}>
+              Restoring will overwrite current data for your school(s) with what's in the file. Use this only if data has actually been lost.
+            </p>
+            <label className="btn btn-ghost" style={{ width: "100%", justifyContent: "center", cursor: "pointer" }}>
+              <Upload size={15} /> Restore from backup file
+              <input ref={backupFileRef} type="file" accept=".json" style={{ display: "none" }} onChange={handleBackupFileSelect} />
+            </label>
+
+            {!user.schools && (
+              <>
+                <div style={{ borderTop: "1px solid var(--line-soft)", margin: "14px 0" }} />
+                <div className="report-section-label">Automatic snapshots</div>
+                <p style={{ fontSize: 11.5, color: "var(--text-mute)", marginBottom: 10, lineHeight: 1.4 }}>
+                  Taken once a day automatically, plus right before any restore — a fallback even if no one remembers to click Download.
+                </p>
+                {snapshots === null && <p style={{ fontSize: 12.5, color: "var(--text-mute)" }}>Loading…</p>}
+                {snapshots && snapshots.length === 0 && <p style={{ fontSize: 12.5, color: "var(--text-mute)" }}>No snapshots yet — the first automatic one is taken next time the app loads.</p>}
+                <div style={{ maxHeight: 220, overflow: "auto" }}>
+                  {(snapshots || []).map((snap) => (
+                    <div key={snap.id} className="reminder-item" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                      <div>
+                        <div style={{ fontSize: 12.5, fontWeight: 600 }}>{formatDateTime(snap.taken_at)}</div>
+                        <div style={{ fontSize: 11, color: "var(--text-mute)" }}>{snap.reason === "pre-restore" ? "Before a restore" : "Daily"} · {snap.student_count} students</div>
+                      </div>
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <a className="icon-btn" title="Download this snapshot" href={api.getSnapshotDownloadUrl(snap.id)} target="_blank" rel="noreferrer"><Download size={13} /></a>
+                        <button className="icon-btn" title="Restore this snapshot" onClick={() => restoreFromSnapshot(snap)}><History size={13} /></button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {toast && (
+        <div className={`toast ${toast.kind === "warn" ? "warn" : ""}`}>
+          {toast.kind === "warn" ? <AlertTriangle size={15} /> : <Check size={15} />}
+          {toast.text}
+          {toast.action && (
+            <button className="toast-action" onClick={() => { toast.action.onClick(); setToast(null); }}>{toast.action.label}</button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PaymentForm({ student, onSubmit }) {
+  const [amt, setAmt] = useState(student.total - student.paid);
+  const [method, setMethod] = useState("cash");
+  return (
+    <div>
+      <div className="field"><label>Amount received (₹)</label><input type="number" value={amt} onChange={(e) => setAmt(Number(e.target.value))} /></div>
+      <div className="field">
+        <label>Payment method</label>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button
+            type="button"
+            className={method === "cash" ? "btn btn-primary" : "btn btn-ghost"}
+            style={{ flex: 1, justifyContent: "center" }}
+            onClick={() => setMethod("cash")}
+          >
+            Cash
+          </button>
+          <button
+            type="button"
+            className={method === "upi_bank" ? "btn btn-primary" : "btn btn-ghost"}
+            style={{ flex: 1, justifyContent: "center" }}
+            onClick={() => setMethod("upi_bank")}
+          >
+            UPI / Bank
+          </button>
+        </div>
+      </div>
+      <button className="btn btn-primary" style={{ width: "100%", justifyContent: "center" }} onClick={() => onSubmit(amt, method)}><Check size={15} /> Record {amt ? money(amt) : "payment"}</button>
+    </div>
+  );
+}
