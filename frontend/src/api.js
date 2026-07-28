@@ -32,6 +32,8 @@ export const api = {
   toggleTransportMonth: (id, month, enabled) => request(`/api/students/${id}/transport/months`, { method: "POST", body: JSON.stringify({ month, enabled }) }),
   recordTransportPayment: (id, amount, method) => request(`/api/students/${id}/transport/payments`, { method: "POST", body: JSON.stringify({ amount, method }) }),
   resetTransport: (id) => request(`/api/students/${id}/transport/reset`, { method: "POST" }),
+  recordAnnualFeePayment: (id, amount, method) => request(`/api/students/${id}/annual-fee/payments`, { method: "POST", body: JSON.stringify({ amount, method }) }),
+  resetAnnualFee: (id) => request(`/api/students/${id}/annual-fee/reset`, { method: "POST" }),
   recordPreviousSessionPayment: (id, amount, method) => request(`/api/students/${id}/previous-session/payments`, { method: "POST", body: JSON.stringify({ amount, method }) }),
   regenerateSchedule: (id) => request(`/api/students/${id}/regenerate-schedule`, { method: "POST" }),
   deleteStudent: (id) => request(`/api/students/${id}`, { method: "DELETE" }),
@@ -52,3 +54,4 @@ export const api = {
   getSnapshotDownloadUrl: (id) => `${API_URL}/api/backups/${id}`,
   restoreSnapshot: (id) => request(`/api/backups/${id}/restore`, { method: "POST" }),
 };
+  
