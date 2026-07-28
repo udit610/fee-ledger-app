@@ -68,7 +68,12 @@ const daysBetween = (a, b) => Math.round((new Date(a) - new Date(b)) / 86400000)
 
 function statusOf(student, today = todayISO()) {
   const balance = student.total - student.paid;
-  if (balance <= 0) return "paid";
+  if (balance <= 0) {
+    // A cleared current-session balance doesn't mean "Paid" if there's still money
+    // owed from before the rollover — that's always overdue by definition (its due
+    // date was necessarily in a past session).
+    return student.previousSessionDue > 0 ? "overdue" : "paid";
+  }
   return daysBetween(student.due, today) < 0 ? "overdue" : "pending";
 }
 
@@ -259,14 +264,23 @@ function StampBadge({ status }) {
 }
 
 function defaultTemplate(student) {
+  // Previous-session dues are always stated as their own separate line — never
+  // added into the current balance figure — so a parent can tell exactly which
+  // year's fee is still outstanding.
+  const prevLine = student.previousSessionDue > 0
+    ? ` Additionally, a balance of ${money(student.previousSessionDue)} from the previous session is still outstanding.`
+    : "";
   if (isInstallmentPlan(student) && (student.installments || []).length) {
     const next = student.installments.find((i) => !i.paid);
     if (next) {
-      return `Dear Parent, this is a reminder from ${student.school} that the ${next.period} fee of ${money(next.amount)} for ${student.name} (${student.cls}) is due on ${next.due}. Kindly pay at the earliest to avoid late charges. Thank you.`;
+      return `Dear Parent, this is a reminder from ${student.school} that the ${next.period} fee of ${money(next.amount)} for ${student.name} (${student.cls}) is due on ${next.due}.${prevLine} Kindly pay at the earliest to avoid late charges. Thank you.`;
     }
   }
   const balance = student.total - student.paid;
-  return `Dear Parent, this is a reminder from ${student.school} that a fee balance of ${money(balance)} for ${student.name} (${student.cls}) is due on ${student.due}. Kindly pay at the earliest to avoid late charges. Thank you.`;
+  if (balance <= 0 && student.previousSessionDue > 0) {
+    return `Dear Parent, this is a reminder from ${student.school} that a balance of ${money(student.previousSessionDue)} from the previous session is still outstanding for ${student.name} (${student.cls}). Kindly pay at the earliest to avoid late charges. Thank you.`;
+  }
+  return `Dear Parent, this is a reminder from ${student.school} that a fee balance of ${money(balance)} for ${student.name} (${student.cls}) is due on ${student.due}.${prevLine} Kindly pay at the earliest to avoid late charges. Thank you.`;
 }
 
 function initials(name) {
@@ -518,6 +532,7 @@ function FeeLedger({ user, onLogout }) {
   const [scheduleStudentId, setScheduleStudentId] = useState(null);
   const [scheduleMethodByPeriod, setScheduleMethodByPeriod] = useState({});
   const [transportStudentId, setTransportStudentId] = useState(null);
+  const [previousSessionStudentId, setPreviousSessionStudentId] = useState(null);
   const [editingId, setEditingId] = useState(null);
   const [savingStudent, setSavingStudent] = useState(false);
   const [newStudent, setNewStudent] = useState({ name: "", cls: "", school: allowedSchools[0], phone: "", fatherName: "", transportRate: "", total: "", paid: "", due: "", planSelect: "full", installmentAmount: "" });
@@ -629,6 +644,7 @@ function FeeLedger({ user, onLogout }) {
       overdue: pool.filter((s) => s.status === "overdue").length,
       transportDue: pool.reduce((a, s) => a + transportComputed(s).balance, 0),
       transportCollected: pool.reduce((a, s) => a + transportComputed(s).paid, 0),
+      previousSessionDue: pool.reduce((a, s) => a + (s.previousSessionDue || 0), 0),
     };
   }, [students, schoolFilter, classFilter, planFilter]);
 
@@ -641,6 +657,11 @@ function FeeLedger({ user, onLogout }) {
   useEffect(() => {
     if (transportStudentId && !students.find((s) => s.id === transportStudentId)) setTransportStudentId(null);
   }, [students, transportStudentId]);
+
+  const previousSessionStudent = previousSessionStudentId ? students.find((s) => s.id === previousSessionStudentId) || null : null;
+  useEffect(() => {
+    if (previousSessionStudentId && !students.find((s) => s.id === previousSessionStudentId)) setPreviousSessionStudentId(null);
+  }, [students, previousSessionStudentId]);
 
   const collectionPct = stats.totalFees > 0 ? Math.round((stats.collected / stats.totalFees) * 100) : 0;
 
@@ -802,6 +823,16 @@ function FeeLedger({ user, onLogout }) {
       const updated = await api.recordTransportPayment(studentId, amount, method);
       setStudents((prev) => prev.map((x) => (x.id === studentId ? updated : x)));
       setToast({ kind: "ok", text: `Recorded ${money(amount)} transport payment.` });
+    } catch (err) {
+      setToast({ kind: "warn", text: err.message });
+    }
+  }
+
+  async function recordPreviousSessionPayment(studentId, amount, method) {
+    try {
+      const updated = await api.recordPreviousSessionPayment(studentId, amount, method);
+      setStudents((prev) => prev.map((x) => (x.id === studentId ? updated : x)));
+      setToast({ kind: "ok", text: `Recorded ${money(amount)} previous-session payment.` });
     } catch (err) {
       setToast({ kind: "warn", text: err.message });
     }
@@ -1437,6 +1468,12 @@ function FeeLedger({ user, onLogout }) {
                     <div className="stat-card"><div className="stat-label">Transport due</div><div className="stat-value amber">{money(stats.transportDue)}</div></div>
                   </div>
                 )}
+
+                {stats.previousSessionDue > 0 && (
+                  <div className="stats-row">
+                    <div className="stat-card"><div className="stat-label">Previous session due</div><div className="stat-value red">{money(stats.previousSessionDue)}</div></div>
+                  </div>
+                )}
               </>
             )}
           </>
@@ -1579,6 +1616,11 @@ function FeeLedger({ user, onLogout }) {
                           <Bus size={11} style={{ verticalAlign: -2, marginRight: 3 }} />Transport {money(transport.balance)} due
                         </span>
                       )}
+                      {s.previousSessionDue > 0 && (
+                        <span className="plan-chip" style={{ marginLeft: installment || (transport && transport.balance > 0) ? 6 : 0, color: "var(--over)", borderColor: "var(--over)" }}>
+                          <History size={11} style={{ verticalAlign: -2, marginRight: 3 }} />Previous session {money(s.previousSessionDue)} due
+                        </span>
+                      )}
                       <div className="progress-track"><div className="progress-fill" style={{ width: `${pct}%`, background: meta.color }} /></div>
                     </div>
                     <div className="row-right">
@@ -1601,6 +1643,11 @@ function FeeLedger({ user, onLogout }) {
                         {s.transportRate > 0 && (
                           <button className="icon-btn" title="Transport" onClick={() => setTransportStudentId(s.id)}>
                             <Bus size={14} />
+                          </button>
+                        )}
+                        {s.previousSessionDue > 0 && (
+                          <button className="icon-btn" title="Previous session dues" onClick={() => setPreviousSessionStudentId(s.id)} style={{ color: "var(--over)" }}>
+                            <History size={14} />
                           </button>
                         )}
                         {!isCollector && (
@@ -2029,6 +2076,40 @@ function FeeLedger({ user, onLogout }) {
           </div>
         );
       })()}
+
+      {previousSessionStudent && (
+        <div className="modal-backdrop" onClick={() => setPreviousSessionStudentId(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 440 }}>
+            <div className="modal-head">
+              <div className="modal-title">Previous session dues</div>
+              <button className="icon-btn" onClick={() => setPreviousSessionStudentId(null)}><X size={16} /></button>
+            </div>
+            <p style={{ fontSize: 13, color: "var(--text-soft)", marginBottom: 4 }}>{previousSessionStudent.name}</p>
+            <p style={{ fontSize: 13, marginBottom: 16 }}>
+              <span style={{ color: "var(--over)" }}><strong>{money(previousSessionStudent.previousSessionDue)}</strong> still due from before the current session</span>
+            </p>
+            <p style={{ fontSize: 12, color: "var(--text-mute)", marginBottom: 16 }}>
+              This is tracked separately from {previousSessionStudent.name}'s current-session balance — it's never added into "Balance due" or the current-session reminders, and shows up as its own line in messages when it's outstanding.
+            </p>
+            <div style={{ paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+              <PaymentForm
+                student={{ total: previousSessionStudent.previousSessionDue, paid: 0 }}
+                onSubmit={(amt, method) => recordPreviousSessionPayment(previousSessionStudent.id, amt, method)}
+              />
+            </div>
+            {(previousSessionStudent.previousSessionPayments || []).length > 0 && (
+              <div style={{ maxHeight: 180, overflow: "auto", paddingTop: 12, marginTop: 16, borderTop: "1px solid var(--border)" }}>
+                {[...(previousSessionStudent.previousSessionPayments || [])].reverse().map((p, i) => (
+                  <div className="history-item" key={i}>
+                    <div className="history-top"><span className="mono">{money(p.amount)}</span><span className="history-time">{new Date(p.date).toLocaleString()}</span></div>
+                    {(p.method || p.by) && <div style={{ fontSize: 11.5, color: "var(--text-mute)" }}>{p.method ? (p.method === "upi_bank" ? "UPI / Bank" : "Cash") : ""}{p.method && p.by ? " · " : ""}{p.by ? `Collected by ${p.by}` : ""}</div>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {showReminderPanel && (
         <div className="modal-backdrop" onClick={() => setShowReminderPanel(false)}>
