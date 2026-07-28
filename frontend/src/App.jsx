@@ -60,6 +60,30 @@ function planSelectValue(planType, frequency) {
 const FONT_IMPORT = `@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@500;600&family=Inter:wght@400;500;600;700;800&display=swap');`;
 
 const money = (n) => "₹" + Number(n || 0).toLocaleString("en-IN");
+
+// Every on-screen date uses this one format, DD/Month/YYYY (e.g. "27/July/2026") —
+// previously some spots showed raw "2026-07-27" (ISO) and others showed
+// browser-locale "7/28/2026", which read as inconsistent side by side.
+// For DATE-ONLY strings ("2026-07-27") — due dates, expense dates, etc.
+function formatDate(dateStr) {
+  if (!dateStr) return "—";
+  const d = new Date(dateStr + "T00:00:00"); // parsed as local time, not UTC — avoids the day-off-by-one bug fixed elsewhere in this file
+  if (isNaN(d)) return String(dateStr);
+  const day = String(d.getDate()).padStart(2, "0");
+  const month = d.toLocaleDateString("en-US", { month: "long" });
+  return `${day}/${month}/${d.getFullYear()}`;
+}
+// For full TIMESTAMPS (already-precise ISO instants, e.g. new Date().toISOString())
+// — payment logs, "added by", audit history, reminders, backups.
+function formatDateTime(dateTimeStr) {
+  if (!dateTimeStr) return "—";
+  const d = new Date(dateTimeStr);
+  if (isNaN(d)) return String(dateTimeStr);
+  const day = String(d.getDate()).padStart(2, "0");
+  const month = d.toLocaleDateString("en-US", { month: "long" });
+  const time = d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true });
+  return `${day}/${month}/${d.getFullYear()}, ${time}`;
+}
 const todayISO = () => {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -273,14 +297,14 @@ function defaultTemplate(student) {
   if (isInstallmentPlan(student) && (student.installments || []).length) {
     const next = student.installments.find((i) => !i.paid);
     if (next) {
-      return `Dear Parent, this is a reminder from ${student.school} that the ${next.period} fee of ${money(next.amount)} for ${student.name} (${student.cls}) is due on ${next.due}.${prevLine} Kindly pay at the earliest to avoid late charges. Thank you.`;
+      return `Dear Parent, this is a reminder from ${student.school} that the ${next.period} fee of ${money(next.amount)} for ${student.name} (${student.cls}) is due on ${formatDate(next.due)}.${prevLine} Kindly pay at the earliest to avoid late charges. Thank you.`;
     }
   }
   const balance = student.total - student.paid;
   if (balance <= 0 && student.previousSessionDue > 0) {
     return `Dear Parent, this is a reminder from ${student.school} that a balance of ${money(student.previousSessionDue)} from the previous session is still outstanding for ${student.name} (${student.cls}). Kindly pay at the earliest to avoid late charges. Thank you.`;
   }
-  return `Dear Parent, this is a reminder from ${student.school} that a fee balance of ${money(balance)} for ${student.name} (${student.cls}) is due on ${student.due}.${prevLine} Kindly pay at the earliest to avoid late charges. Thank you.`;
+  return `Dear Parent, this is a reminder from ${student.school} that a fee balance of ${money(balance)} for ${student.name} (${student.cls}) is due on ${formatDate(student.due)}.${prevLine} Kindly pay at the earliest to avoid late charges. Thank you.`;
 }
 
 function initials(name) {
@@ -403,7 +427,7 @@ function parseWorkbook(arrayBuffer) {
 
 // ---------------- Google Sign-In gate ----------------
 
-function GoogleGate({ onLoggedIn }) {
+function GoogleGate({ onLoggedIn, notice }) {
   const btnRef = useRef(null);
   const [error, setError] = useState("");
 
@@ -435,6 +459,7 @@ function GoogleGate({ onLoggedIn }) {
         <p style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, color: "#8B8776", marginBottom: 24, lineHeight: 1.6 }}>Sign in with a Google account authorized for this ledger.</p>
         <div ref={btnRef} style={{ display: "flex", justifyContent: "center" }} />
         {!GOOGLE_CLIENT_ID && <p style={{ color: "#C4102A", fontSize: 12, marginTop: 14 }}>VITE_GOOGLE_CLIENT_ID is not set — see .env.example</p>}
+        {notice && <p style={{ color: "#8B8776", fontSize: 12.5, marginTop: 14 }}>{notice}</p>}
         {error && <p style={{ color: "#C4102A", fontSize: 12.5, marginTop: 14 }}>{error}</p>}
       </div>
     </div>
@@ -485,13 +510,39 @@ function Dropdown({ value, options, onChange, triggerClassName }) {
 
 export default function App() {
   const [user, setUser] = useState(undefined); // undefined = checking, null = signed out
+  const [loggedOutReason, setLoggedOutReason] = useState("");
 
   useEffect(() => {
     api.me().then((r) => setUser(r.user)).catch(() => setUser(null));
   }, []);
 
+  // Auto-logout after 5 minutes of no mouse/keyboard/touch/scroll activity — a
+  // shared front-desk computer left signed in is a real risk for a fee ledger.
+  useEffect(() => {
+    if (!user) return;
+    const TIMEOUT_MS = 5 * 60 * 1000;
+    let timer;
+    const doLogout = () => {
+      api.logout().finally(() => {
+        setLoggedOutReason("Signed out after 5 minutes of inactivity.");
+        setUser(null);
+      });
+    };
+    const resetTimer = () => {
+      clearTimeout(timer);
+      timer = setTimeout(doLogout, TIMEOUT_MS);
+    };
+    const events = ["mousemove", "mousedown", "keydown", "scroll", "touchstart"];
+    events.forEach((evt) => window.addEventListener(evt, resetTimer));
+    resetTimer();
+    return () => {
+      clearTimeout(timer);
+      events.forEach((evt) => window.removeEventListener(evt, resetTimer));
+    };
+  }, [user]);
+
   if (user === undefined) return <div style={{ minHeight: "100vh", background: "#FAF8F2" }} />;
-  if (!user) return <GoogleGate onLoggedIn={setUser} />;
+  if (!user) return <GoogleGate onLoggedIn={(u) => { setLoggedOutReason(""); setUser(u); }} notice={loggedOutReason} />;
   return <FeeLedger user={user} onLogout={() => { api.logout().finally(() => setUser(null)); }} />;
 }
 
@@ -1167,7 +1218,7 @@ function FeeLedger({ user, onLogout }) {
   }
 
   async function restoreFromSnapshot(snap) {
-    if (!window.confirm(`Restore the automatic snapshot from ${new Date(snap.taken_at).toLocaleString()} (${snap.student_count} students)? This overwrites current data — a fresh safety snapshot of what's there right now is taken automatically first.`)) return;
+    if (!window.confirm(`Restore the automatic snapshot from ${formatDateTime(snap.taken_at)} (${snap.student_count} students)? This overwrites current data — a fresh safety snapshot of what's there right now is taken automatically first.`)) return;
     try {
       const result = await api.restoreSnapshot(snap.id);
       setToast({ kind: "ok", text: `Restored ${result.studentsRestored} students from snapshot.` });
@@ -1609,7 +1660,7 @@ function FeeLedger({ user, onLogout }) {
                     <div>
                       <div className="row-name">{s.name}</div>
                       <div className="row-sub">
-                        {s.cls} · {s.school} · Due {s.due}
+                        {s.cls} · {s.school} · Due {formatDate(s.due)}
                         {s.status === "overdue" && <span style={{ color: "var(--over)", fontWeight: 600 }}> · {s.daysOverdue}d overdue</span>}
                         {duplicateNames.has(normName(s.name)) && s.fatherName && <span> · Father: {s.fatherName}</span>}
                       </div>
@@ -1728,11 +1779,11 @@ function FeeLedger({ user, onLogout }) {
                   <div>
                     <div className="row-name">{e.category}</div>
                     <div className="row-sub">
-                      {e.description || "—"}{e.vendor && ` · ${e.vendor}`} · {e.school} · {e.date}
+                      {e.description || "—"}{e.vendor && ` · ${e.vendor}`} · {e.school} · {formatDate(e.date)}
                     </div>
                     {createdEntry && (
                       <div style={{ fontSize: 11, color: "var(--text-mute)", marginTop: 2 }}>
-                        Added by {createdEntry.by || "—"} · {new Date(createdEntry.at).toLocaleString()}
+                        Added by {createdEntry.by || "—"} · {formatDateTime(createdEntry.at)}
                       </div>
                     )}
                   </div>
@@ -1835,7 +1886,7 @@ function FeeLedger({ user, onLogout }) {
           <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 420 }}>
             <div className="modal-head"><div className="modal-title">Expense details</div><button className="icon-btn" onClick={() => setHistoryExpense(null)}><X size={16} /></button></div>
             <p style={{ fontSize: 13, color: "var(--text-soft)", marginBottom: 4 }}>{historyExpense.category} · {money(historyExpense.amount)}</p>
-            <p style={{ fontSize: 12.5, color: "var(--text-mute)", marginBottom: 16 }}>{historyExpense.description || "No description"}{historyExpense.vendor && ` · Paid to ${historyExpense.vendor}`} · {historyExpense.school} · {historyExpense.date}</p>
+            <p style={{ fontSize: 12.5, color: "var(--text-mute)", marginBottom: 16 }}>{historyExpense.description || "No description"}{historyExpense.vendor && ` · Paid to ${historyExpense.vendor}`} · {historyExpense.school} · {formatDate(historyExpense.date)}</p>
             {(historyExpense.history || []).filter((h) => h.field !== "created").length > 0 ? (
               <>
                 <div className="report-section-label">Changes</div>
@@ -1843,7 +1894,7 @@ function FeeLedger({ user, onLogout }) {
                   <div className="history-item" key={i}>
                     <div className="history-top">
                       <span>{h.field}: <span className="mono">{String(h.oldValue ?? "—")}</span> → <span className="mono">{String(h.newValue ?? "—")}</span></span>
-                      <span className="history-time">{new Date(h.at).toLocaleString()}</span>
+                      <span className="history-time">{formatDateTime(h.at)}</span>
                     </div>
                     <div style={{ fontSize: 11.5, color: "var(--text-mute)", marginTop: 2 }}>by {h.by}</div>
                   </div>
@@ -1885,7 +1936,7 @@ function FeeLedger({ user, onLogout }) {
                   {importRows.map((r) => (
                     <div key={r.id} className="reminder-item" style={{ background: r.errors.length ? "rgba(255,59,48,0.12)" : (r.duplicate || r.suspiciousTransportRate) ? "rgba(255,149,0,0.14)" : "#fff" }}>
                       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, fontWeight: 600 }}><span>Row {r.rowNum}: {r.name || "(no name)"}</span><span className="mono">{money(r.total)}</span></div>
-                      <div style={{ fontSize: 12, color: "var(--text-mute)" }}>{r.cls} · {r.school} · Due {r.due || "—"}</div>
+                      <div style={{ fontSize: 12, color: "var(--text-mute)" }}>{r.cls} · {r.school} · Due {r.due ? formatDate(r.due) : "—"}</div>
                       {r.errors.length > 0 && <div style={{ fontSize: 11.5, color: "var(--over)", marginTop: 4 }}><AlertCircle size={12} style={{ verticalAlign: "middle" }} /> {r.errors.join(" · ")}</div>}
                       {r.duplicate && r.errors.length === 0 && (
                         <div style={{ fontSize: 11.5, color: "var(--due)", marginTop: 4 }}><AlertCircle size={12} style={{ verticalAlign: "middle" }} /> Looks like an existing student{skipDuplicates ? " — will be skipped" : ""}</div>
@@ -1912,7 +1963,7 @@ function FeeLedger({ user, onLogout }) {
             <div className="modal-head"><div className="modal-title">Payment history</div><button className="icon-btn" onClick={() => setHistoryStudent(null)}><X size={16} /></button></div>
             <p style={{ fontSize: 13, color: "var(--text-soft)", marginBottom: 12 }}>{historyStudent.name} · {money(historyStudent.paid)} paid of {money(historyStudent.total)}</p>
             {(historyStudent.payments || []).slice().reverse().map((p, i) => (
-              <div className="history-item" key={i}><div className="history-top"><span className="mono">{money(p.amount)}</span><span className="history-time">{new Date(p.date).toLocaleString()}</span></div>{(p.method || p.by) && <div style={{ fontSize: 11.5, color: "var(--text-mute)" }}>{p.method ? (p.method === "upi_bank" ? "UPI / Bank" : "Cash") : ""}{p.method && p.by ? " · " : ""}{p.by ? `Collected by ${p.by}` : ""}</div>}</div>
+              <div className="history-item" key={i}><div className="history-top"><span className="mono">{money(p.amount)}</span><span className="history-time">{formatDateTime(p.date)}</span></div>{(p.method || p.by) && <div style={{ fontSize: 11.5, color: "var(--text-mute)" }}>{p.method ? (p.method === "upi_bank" ? "UPI / Bank" : "Cash") : ""}{p.method && p.by ? " · " : ""}{p.by ? `Collected by ${p.by}` : ""}</div>}</div>
             ))}
             {(historyStudent.payments || []).length === 0 && <p style={{ fontSize: 12.5, color: "var(--text-mute)" }}>No payments logged yet.</p>}
 
@@ -1923,7 +1974,7 @@ function FeeLedger({ user, onLogout }) {
                   <div className="history-item" key={i}>
                     <div className="history-top">
                       <span>{h.field}: <span className="mono">{String(h.oldValue ?? "—")}</span> → <span className="mono">{String(h.newValue ?? "—")}</span></span>
-                      <span className="history-time">{new Date(h.at).toLocaleString()}</span>
+                      <span className="history-time">{formatDateTime(h.at)}</span>
                     </div>
                     <div style={{ fontSize: 11.5, color: "var(--text-mute)", marginTop: 2 }}>by {h.by}</div>
                   </div>
@@ -1963,9 +2014,9 @@ function FeeLedger({ user, onLogout }) {
                   <div>
                     <div style={{ fontWeight: 600, fontSize: 13.5 }}>{inst.period}</div>
                     <div style={{ fontSize: 12, color: "var(--text-mute)" }}>
-                      {money(inst.amount)} · Due {inst.due}
+                      {money(inst.amount)} · Due {formatDate(inst.due)}
                       {inst.paid && inst.paidDate && (
-                        <span> · Paid {new Date(inst.paidDate).toLocaleString()}{inst.paidBy && ` by ${inst.paidBy}`}</span>
+                        <span> · Paid {formatDateTime(inst.paidDate)}{inst.paidBy && ` by ${inst.paidBy}`}</span>
                       )}
                     </div>
                   </div>
@@ -2073,7 +2124,7 @@ function FeeLedger({ user, onLogout }) {
                 <div style={{ maxHeight: 180, overflow: "auto", paddingTop: 12, borderTop: "1px solid var(--border)" }}>
                   {[...(transportStudent.transportPayments || [])].reverse().map((p, i) => (
                     <div className="history-item" key={i}>
-                      <div className="history-top"><span className="mono">{money(p.amount)}</span><span className="history-time">{new Date(p.date).toLocaleString()}</span></div>
+                      <div className="history-top"><span className="mono">{money(p.amount)}</span><span className="history-time">{formatDateTime(p.date)}</span></div>
                       {(p.method || p.by) && <div style={{ fontSize: 11.5, color: "var(--text-mute)" }}>{p.method ? (p.method === "upi_bank" ? "UPI / Bank" : "Cash") : ""}{p.method && p.by ? " · " : ""}{p.by ? `Collected by ${p.by}` : ""}</div>}
                     </div>
                   ))}
@@ -2117,7 +2168,7 @@ function FeeLedger({ user, onLogout }) {
               <div style={{ maxHeight: 180, overflow: "auto", paddingTop: 12, marginTop: 16, borderTop: "1px solid var(--border)" }}>
                 {[...(previousSessionStudent.previousSessionPayments || [])].reverse().map((p, i) => (
                   <div className="history-item" key={i}>
-                    <div className="history-top"><span className="mono">{money(p.amount)}</span><span className="history-time">{new Date(p.date).toLocaleString()}</span></div>
+                    <div className="history-top"><span className="mono">{money(p.amount)}</span><span className="history-time">{formatDateTime(p.date)}</span></div>
                     {(p.method || p.by) && <div style={{ fontSize: 11.5, color: "var(--text-mute)" }}>{p.method ? (p.method === "upi_bank" ? "UPI / Bank" : "Cash") : ""}{p.method && p.by ? " · " : ""}{p.by ? `Collected by ${p.by}` : ""}</div>}
                   </div>
                 ))}
@@ -2155,7 +2206,7 @@ function FeeLedger({ user, onLogout }) {
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-head"><div className="modal-title">Reminder history</div><button className="icon-btn" onClick={() => setShowHistory(false)}><X size={16} /></button></div>
             {reminders.map((r) => (
-              <div className="history-item" key={r.id}><div className="history-top"><span>{r.name}</span><span className="history-time">{new Date(r.sentAt).toLocaleString()}</span></div><div className="history-msg">{r.message}</div></div>
+              <div className="history-item" key={r.id}><div className="history-top"><span>{r.name}</span><span className="history-time">{formatDateTime(r.sentAt)}</span></div><div className="history-msg">{r.message}</div></div>
             ))}
           </div>
         </div>
@@ -2256,7 +2307,7 @@ function FeeLedger({ user, onLogout }) {
                   {(snapshots || []).map((snap) => (
                     <div key={snap.id} className="reminder-item" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
                       <div>
-                        <div style={{ fontSize: 12.5, fontWeight: 600 }}>{new Date(snap.taken_at).toLocaleString()}</div>
+                        <div style={{ fontSize: 12.5, fontWeight: 600 }}>{formatDateTime(snap.taken_at)}</div>
                         <div style={{ fontSize: 11, color: "var(--text-mute)" }}>{snap.reason === "pre-restore" ? "Before a restore" : "Daily"} · {snap.student_count} students</div>
                       </div>
                       <div style={{ display: "flex", gap: 6 }}>
