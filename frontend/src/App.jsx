@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
-import { Search, Plus, MessageCircle, X, Check, Clock, AlertTriangle, IndianRupee, Send, History, Trash2, Upload, Download, FileSpreadsheet, AlertCircle, Pencil, LogOut, ChevronDown, BarChart3, DatabaseBackup, Sun, Moon, Bus } from "lucide-react";
+import { Search, Plus, MessageCircle, X, Check, Clock, AlertTriangle, IndianRupee, Send, History, Trash2, Upload, Download, FileSpreadsheet, AlertCircle, Pencil, LogOut, ChevronDown, BarChart3, DatabaseBackup, Sun, Moon, Bus, CalendarClock } from "lucide-react";
 import * as XLSX from "xlsx";
 import { api } from "./api.js";
 
@@ -607,6 +607,7 @@ function FeeLedger({ user, onLogout }) {
   const [scheduleStudentId, setScheduleStudentId] = useState(null);
   const [scheduleMethodByPeriod, setScheduleMethodByPeriod] = useState({});
   const [transportStudentId, setTransportStudentId] = useState(null);
+  const [annualFeeStudentId, setAnnualFeeStudentId] = useState(null);
   const [previousSessionStudentId, setPreviousSessionStudentId] = useState(null);
   const [editingId, setEditingId] = useState(null);
   const [savingStudent, setSavingStudent] = useState(false);
@@ -720,6 +721,8 @@ function FeeLedger({ user, onLogout }) {
       overdueAmount: pool.filter((s) => s.status === "overdue").reduce((a, s) => a + computeTotalPending(s), 0),
       transportDue: pool.reduce((a, s) => a + transportComputed(s).balance, 0),
       transportCollected: pool.reduce((a, s) => a + transportComputed(s).paid, 0),
+      annualFeeDue: pool.reduce((a, s) => a + annualFeeComputed(s).balance, 0),
+      annualFeeCollected: pool.reduce((a, s) => a + annualFeeComputed(s).paid, 0),
       previousSessionDue: pool.reduce((a, s) => a + (s.previousSessionDue || 0), 0),
     };
   }, [students, schoolFilter, classFilter, planFilter]);
@@ -733,6 +736,11 @@ function FeeLedger({ user, onLogout }) {
   useEffect(() => {
     if (transportStudentId && !students.find((s) => s.id === transportStudentId)) setTransportStudentId(null);
   }, [students, transportStudentId]);
+
+  const annualFeeStudent = annualFeeStudentId ? students.find((s) => s.id === annualFeeStudentId) || null : null;
+  useEffect(() => {
+    if (annualFeeStudentId && !students.find((s) => s.id === annualFeeStudentId)) setAnnualFeeStudentId(null);
+  }, [students, annualFeeStudentId]);
 
   const previousSessionStudent = previousSessionStudentId ? students.find((s) => s.id === previousSessionStudentId) || null : null;
   useEffect(() => {
@@ -909,6 +917,27 @@ function FeeLedger({ user, onLogout }) {
       const updated = await api.recordPreviousSessionPayment(studentId, amount, method);
       setStudents((prev) => prev.map((x) => (x.id === studentId ? updated : x)));
       setToast({ kind: "ok", text: `Recorded ${money(amount)} previous-session payment.` });
+    } catch (err) {
+      setToast({ kind: "warn", text: err.message });
+    }
+  }
+
+  async function recordAnnualFeePayment(studentId, amount, method) {
+    try {
+      const updated = await api.recordAnnualFeePayment(studentId, amount, method);
+      setStudents((prev) => prev.map((x) => (x.id === studentId ? updated : x)));
+      setToast({ kind: "ok", text: `Recorded ${money(amount)} Annual Fee payment.` });
+    } catch (err) {
+      setToast({ kind: "warn", text: err.message });
+    }
+  }
+
+  async function resetAnnualFee(studentId) {
+    if (!window.confirm("This clears the paid total and payment log for this student's Annual Fee. Continue?")) return;
+    try {
+      const updated = await api.resetAnnualFee(studentId);
+      setStudents((prev) => prev.map((x) => (x.id === studentId ? updated : x)));
+      setToast({ kind: "ok", text: "Annual Fee reset." });
     } catch (err) {
       setToast({ kind: "warn", text: err.message });
     }
@@ -1551,6 +1580,13 @@ function FeeLedger({ user, onLogout }) {
                   </div>
                 )}
 
+                {(stats.annualFeeDue > 0 || stats.annualFeeCollected > 0) && (
+                  <div className="stats-row">
+                    <div className="stat-card"><div className="stat-label">Annual fee collected</div><div className="stat-value">{money(stats.annualFeeCollected)}</div></div>
+                    <div className="stat-card"><div className="stat-label">Annual fee due</div><div className="stat-value amber">{money(stats.annualFeeDue)}</div></div>
+                  </div>
+                )}
+
                 {stats.previousSessionDue > 0 && (
                   <div className="stats-row">
                     <div className="stat-card"><div className="stat-label">Previous session due</div><div className="stat-value red">{money(stats.previousSessionDue)}</div></div>
@@ -1675,6 +1711,7 @@ function FeeLedger({ user, onLogout }) {
                 const paidCount = installment ? (s.installments || []).filter((i) => i.paid).length : 0;
                 const totalCount = installment ? (s.installments || []).length : 0;
                 const transport = s.transportRate > 0 ? transportComputed(s) : null;
+                const annualFee = s.annualFeeAmount > 0 ? annualFeeComputed(s) : null;
                 return (
                   <div className="row" key={s.id}>
                     {isCollector ? (
@@ -1698,8 +1735,13 @@ function FeeLedger({ user, onLogout }) {
                           <Bus size={11} style={{ verticalAlign: -2, marginRight: 3 }} />Transport {money(transport.balance)} due
                         </span>
                       )}
-                      {s.previousSessionDue > 0 && (
+                      {annualFee && annualFee.balance > 0 && (
                         <span className="plan-chip" style={{ marginLeft: installment || (transport && transport.balance > 0) ? 6 : 0, color: "var(--over)", borderColor: "var(--over)" }}>
+                          <CalendarClock size={11} style={{ verticalAlign: -2, marginRight: 3 }} />Annual fee {money(annualFee.balance)} due
+                        </span>
+                      )}
+                      {s.previousSessionDue > 0 && (
+                        <span className="plan-chip" style={{ marginLeft: installment || (transport && transport.balance > 0) || (annualFee && annualFee.balance > 0) ? 6 : 0, color: "var(--over)", borderColor: "var(--over)" }}>
                           <Clock size={11} style={{ verticalAlign: -2, marginRight: 3 }} />Previous session {money(s.previousSessionDue)} due
                         </span>
                       )}
@@ -1725,6 +1767,11 @@ function FeeLedger({ user, onLogout }) {
                         {s.transportRate > 0 && (
                           <button className="icon-btn" title="Transport" onClick={() => setTransportStudentId(s.id)}>
                             <Bus size={14} />
+                          </button>
+                        )}
+                        {s.annualFeeAmount > 0 && (
+                          <button className="icon-btn" title="Annual fee" onClick={() => setAnnualFeeStudentId(s.id)}>
+                            <CalendarClock size={14} />
                           </button>
                         )}
                         {s.previousSessionDue > 0 && (
@@ -2167,6 +2214,51 @@ function FeeLedger({ user, onLogout }) {
                   onClick={() => resetTransport(transportStudent.id)}
                 >
                   Regenerate transport
+                </button>
+              )}
+            </div>
+          </div>
+        );
+      })()}
+
+      {annualFeeStudent && (() => {
+        const computed = annualFeeComputed(annualFeeStudent);
+        return (
+          <div className="modal-backdrop" onClick={() => setAnnualFeeStudentId(null)}>
+            <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 440 }}>
+              <div className="modal-head">
+                <div className="modal-title">Annual fee</div>
+                <button className="icon-btn" onClick={() => setAnnualFeeStudentId(null)}><X size={16} /></button>
+              </div>
+              <p style={{ fontSize: 13, color: "var(--text-soft)", marginBottom: 4 }}>
+                {annualFeeStudent.name} · {money(annualFeeStudent.annualFeeAmount)}/year
+              </p>
+              <p style={{ fontSize: 13, marginBottom: 16 }}>
+                <strong>{money(computed.paid)}</strong> paid of {money(computed.total)}
+                {computed.balance > 0 && <span style={{ color: "var(--over)" }}> · {money(computed.balance)} due</span>}
+              </p>
+              {computed.balance > 0 && (
+                <div style={{ marginBottom: 16, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+                  <PaymentForm student={{ total: computed.total, paid: computed.paid }} onSubmit={(amt, method) => recordAnnualFeePayment(annualFeeStudent.id, amt, method)} />
+                </div>
+              )}
+              {(annualFeeStudent.annualFeePayments || []).length > 0 && (
+                <div style={{ maxHeight: 180, overflow: "auto", paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+                  {[...(annualFeeStudent.annualFeePayments || [])].reverse().map((p, i) => (
+                    <div className="history-item" key={i}>
+                      <div className="history-top"><span className="mono">{money(p.amount)}</span><span className="history-time">{formatDateTime(p.date)}</span></div>
+                      {(p.method || p.by) && <div style={{ fontSize: 11.5, color: "var(--text-mute)" }}>{p.method ? (p.method === "upi_bank" ? "UPI / Bank" : "Cash") : ""}{p.method && p.by ? " · " : ""}{p.by ? `Collected by ${p.by}` : ""}</div>}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {!isCollector && (
+                <button
+                  className="btn btn-ghost"
+                  style={{ width: "100%", justifyContent: "center", marginTop: 16, paddingTop: 12, borderTop: "1px solid var(--border)" }}
+                  onClick={() => resetAnnualFee(annualFeeStudent.id)}
+                >
+                  Reset Annual Fee
                 </button>
               )}
             </div>
