@@ -251,6 +251,15 @@ function monthYearLabel(dateStr) {
   return d.toLocaleDateString("en-US", { month: "long", year: "numeric" });
 }
 
+// Backward-compatible read of how much has actually been paid toward one
+// installment — older rows only ever had a boolean `paid`, never a running
+// `paidAmount`, so fall back to treating a fully-paid old installment as
+// paidAmount === amount.
+function instPaidAmount(inst) {
+  if (inst.paidAmount != null) return Number(inst.paidAmount) || 0;
+  return inst.paid ? Number(inst.amount) || 0 : 0;
+}
+
 function generateInstallments(frequency, startDue, amount) {
   const cfg = FREQ_CONFIG[frequency] || FREQ_CONFIG.monthly;
   const academicMonths = ACADEMIC_MONTHS[frequency];
@@ -258,7 +267,7 @@ function generateInstallments(frequency, startDue, amount) {
   return Array.from({ length: cfg.count }, (_, i) => {
     const due = academicMonths ? academicYearAnchorDue(startDue, academicMonths[i]) : addMonths(startDue, i * cfg.monthsApart);
     const period = cfg === FREQ_CONFIG.monthly ? monthYearLabel(due) : `${cfg.label} ${i + 1} · ${monthYearLabel(due)}`;
-    return { period, due, amount: amt, paid: false, paidDate: null };
+    return { period, due, amount: amt, paid: false, paidDate: null, paidAmount: 0 };
   });
 }
 
@@ -532,7 +541,14 @@ export const db = {
   // could be based on stale data) — it just says "mark this one period paid" and the
   // database does the read-modify-write atomically, so concurrent marks can't clobber
   // each other no matter how close together they happen.
-  async markInstallmentPaid(id, period, method = "cash", by = "") {
+  // Records a payment against one installment period. If the amount exceeds
+  // what's left owing on that period, the overflow automatically rolls forward
+  // and gets applied to the next unpaid period(s) in chronological order — so
+  // a parent paying ₹2,000 against a ₹1,500 month correctly covers ₹500 of the
+  // next month too, instead of that ₹500 having nowhere to go.
+  // `amount` may be omitted, in which case it defaults to exactly what's left
+  // owing on the named period — i.e. the old one-tap "mark paid" behavior.
+  async recordInstallmentPayment(id, period, amount, method = "cash", by = "") {
     await ready;
     const client = await pool.connect();
     try {
@@ -543,26 +559,46 @@ export const db = {
         return { error: "not_found" };
       }
       const s = toStudent(rows[0]);
-      const inst = (s.installments || []).find((i) => i.period === period);
-      if (!inst) {
+      const sorted = [...(s.installments || [])].sort((a, b) => new Date(a.due) - new Date(b.due));
+      const startIdx = sorted.findIndex((i) => i.period === period);
+      if (startIdx === -1) {
         await safeRollback(client);
         return { error: "period_not_found" };
       }
-      if (inst.paid) {
+      const startInst = sorted[startIdx];
+      const startOwed = Math.max(0, Number(startInst.amount) - instPaidAmount(startInst));
+      if (startOwed <= 0.005) {
         await safeRollback(client);
         return { student: s, alreadyPaid: true };
       }
-      const installments = s.installments.map((i) =>
-        i.period === period ? { ...i, paid: true, paidDate: new Date().toISOString(), paidBy: by } : i
-      );
-      const paid = installments.filter((i) => i.paid).reduce((a, i) => a + Number(i.amount || 0), 0);
-      const payments = [...(s.payments || []), { amount: inst.amount, date: new Date().toISOString(), note: inst.period, method, by }];
+      let remaining = amount != null ? Number(amount) : startOwed;
+      if (!remaining || remaining <= 0) {
+        await safeRollback(client);
+        return { error: "invalid_amount" };
+      }
+      const now = new Date().toISOString();
+      const paymentsLog = [];
+      for (let idx = startIdx; idx < sorted.length && remaining > 0.005; idx++) {
+        const inst = sorted[idx];
+        const owed = Math.max(0, Number(inst.amount) - instPaidAmount(inst));
+        if (owed <= 0.005) continue; // this period's already fully covered — skip to the next one
+        const apply = Math.min(owed, remaining);
+        inst.paidAmount = instPaidAmount(inst) + apply;
+        inst.paid = inst.paidAmount >= Number(inst.amount) - 0.005;
+        if (inst.paid) inst.paidDate = now;
+        inst.paidBy = by;
+        remaining -= apply;
+        paymentsLog.push({ amount: apply, date: now, note: inst.period, method, by });
+      }
+      const leftoverUnapplied = Math.max(0, remaining);
+      const totalPaid = sorted.reduce((a, i) => a + instPaidAmount(i), 0);
+      const payments = [...(s.payments || []), ...paymentsLog];
       const { rows: updated } = await client.query(
         "UPDATE students SET installments = $1, paid = $2, payments = $3 WHERE id = $4 RETURNING *",
-        [JSON.stringify(installments), paid, JSON.stringify(payments), id]
+        [JSON.stringify(sorted), totalPaid, JSON.stringify(payments), id]
       );
       await client.query("COMMIT");
-      return { student: toStudent(updated[0]) };
+      return { student: toStudent(updated[0]), leftoverUnapplied };
     } catch (err) {
       await safeRollback(client);
       throw err;
