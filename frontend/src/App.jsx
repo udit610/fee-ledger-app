@@ -160,16 +160,30 @@ function generateInstallments(planType, frequency, startDue, amount) {
   });
 }
 
+// Backward-compatible read of how much has actually been paid toward one
+// installment — mirrors the same helper in db.js. Older rows only ever had a
+// boolean `paid`, never a running `paidAmount`, so a fully-paid old installment
+// is treated as paidAmount === amount.
+function instPaidAmount(inst) {
+  if (inst.paidAmount != null) return Number(inst.paidAmount) || 0;
+  return inst.paid ? Number(inst.amount) || 0 : 0;
+}
+
 // Marks installments paid sequentially (in order) until paidTotal is exhausted.
 // Used on Excel import, where we only know a lump "Paid" total, not which periods.
+// Any leftover that's less than a full installment is recorded as a partial
+// payment against the next period rather than being dropped.
 function markInstallmentsFromPaidTotal(installments, paidTotal) {
   let remaining = Number(paidTotal) || 0;
   return installments.map((inst) => {
-    if (remaining >= inst.amount && inst.amount > 0) {
+    if (remaining <= 0 || !(inst.amount > 0)) return inst;
+    if (remaining >= inst.amount) {
       remaining -= inst.amount;
-      return { ...inst, paid: true, paidDate: new Date().toISOString() };
+      return { ...inst, paid: true, paidDate: new Date().toISOString(), paidAmount: inst.amount };
     }
-    return inst;
+    const partial = remaining;
+    remaining = 0;
+    return { ...inst, paid: false, paidAmount: partial };
   });
 }
 
@@ -179,7 +193,7 @@ function withComputed(student) {
   if (!isInstallmentPlan(student)) return student;
   const installments = student.installments || [];
   const total = installments.reduce((a, i) => a + Number(i.amount || 0), 0);
-  const paid = installments.filter((i) => i.paid).reduce((a, i) => a + Number(i.amount || 0), 0);
+  const paid = installments.reduce((a, i) => a + instPaidAmount(i), 0);
   const nextUnpaid = installments.find((i) => !i.paid);
   const due = nextUnpaid ? nextUnpaid.due : (installments[installments.length - 1]?.due || student.due);
   return { ...student, total, paid, due };
@@ -232,7 +246,7 @@ function annualFeeComputed(student) {
 function accruedInstallmentBalance(student, today = todayISO()) {
   return (student.installments || [])
     .filter((i) => !i.paid && i.due <= today)
-    .reduce((a, i) => a + Number(i.amount || 0), 0);
+    .reduce((a, i) => a + Math.max(0, Number(i.amount || 0) - instPaidAmount(i)), 0);
 }
 
 // The single source of truth for "how much does this parent owe right now,
@@ -606,6 +620,7 @@ function FeeLedger({ user, onLogout }) {
   const [historyStudent, setHistoryStudent] = useState(null);
   const [scheduleStudentId, setScheduleStudentId] = useState(null);
   const [scheduleMethodByPeriod, setScheduleMethodByPeriod] = useState({});
+  const [scheduleAmountByPeriod, setScheduleAmountByPeriod] = useState({});
   const [transportStudentId, setTransportStudentId] = useState(null);
   const [annualFeeStudentId, setAnnualFeeStudentId] = useState(null);
   const [previousSessionStudentId, setPreviousSessionStudentId] = useState(null);
@@ -876,18 +891,29 @@ function FeeLedger({ user, onLogout }) {
     }
   }
 
-  async function markInstallmentPaid(studentId, period, method) {
+  async function recordInstallmentPayment(studentId, period, amount) {
     const s = students.find((x) => x.id === studentId);
     if (!s) return;
     const inst = (s.installments || []).find((i) => i.period === period);
-    if (!inst || inst.paid) return;
+    if (!inst) return;
+    const owed = Math.max(0, Number(inst.amount) - instPaidAmount(inst));
+    if (owed <= 0) return;
+    const method = scheduleMethodByPeriod[period] || "cash";
+    const amt = Number(amount);
+    if (!amt || amt <= 0) return setToast({ kind: "warn", text: "Enter a payment amount greater than zero." });
     try {
-      // Server marks this one installment paid atomically (row-locked) — we don't
-      // send the array back ourselves, so a second person acting on the same
-      // student at nearly the same time can't clobber this change. See db.js.
-      const updated = await api.markInstallmentPaid(studentId, period, method);
+      // Server applies this atomically (row-locked) and rolls any amount beyond
+      // what's owed on this period forward onto the next unpaid period(s) — we
+      // don't compute or send the installments array ourselves. See db.js.
+      const { leftoverUnapplied, ...updated } = await api.recordInstallmentPayment(studentId, period, amt, method);
       setStudents((prev) => prev.map((x) => (x.id === studentId ? updated : x)));
-      setToast({ kind: "ok", text: `${inst.period} marked paid.` });
+      if (leftoverUnapplied > 0) {
+        setToast({ kind: "warn", text: `Recorded ${money(amt - leftoverUnapplied)} — the remaining ${money(leftoverUnapplied)} couldn't be applied since the rest of the schedule is already fully paid.` });
+      } else if (amt > owed) {
+        setToast({ kind: "ok", text: `Recorded ${money(amt)} — ${money(owed)} applied to ${period}, ${money(amt - owed)} rolled over to the next due month.` });
+      } else {
+        setToast({ kind: "ok", text: `Recorded ${money(amt)} for ${period}.` });
+      }
     } catch (err) {
       setToast({ kind: "warn", text: err.message });
     }
@@ -2086,54 +2112,78 @@ function FeeLedger({ user, onLogout }) {
               <strong>{money(scheduleStudent.paid)}</strong> paid of {money(scheduleStudent.total)}
             </p>
             <div style={{ maxHeight: 340, overflow: "auto", marginBottom: 12 }}>
-              {(scheduleStudent.installments || []).map((inst) => (
-                <div key={inst.period} className="reminder-item" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-                  <div>
-                    <div style={{ fontWeight: 600, fontSize: 13.5 }}>{inst.period}</div>
-                    <div style={{ fontSize: 12, color: "var(--text-mute)" }}>
-                      {money(inst.amount)} · Due {formatDate(inst.due)}
-                      {inst.paid && inst.paidDate && (
-                        <span> · Paid {formatDateTime(inst.paidDate)}{inst.paidBy && ` by ${inst.paidBy}`}</span>
+              {(scheduleStudent.installments || []).map((inst) => {
+                const paidSoFar = instPaidAmount(inst);
+                const owed = Math.max(0, Number(inst.amount) - paidSoFar);
+                const amountValue = scheduleAmountByPeriod[inst.period] ?? String(owed);
+                return (
+                  <div key={inst.period} className="reminder-item" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                      <div>
+                        <div style={{ fontWeight: 600, fontSize: 13.5 }}>{inst.period}</div>
+                        <div style={{ fontSize: 12, color: "var(--text-mute)" }}>
+                          {money(inst.amount)} · Due {formatDate(inst.due)}
+                          {inst.paid && inst.paidDate && (
+                            <span> · Paid {formatDateTime(inst.paidDate)}{inst.paidBy && ` by ${inst.paidBy}`}</span>
+                          )}
+                          {!inst.paid && paidSoFar > 0 && (
+                            <span> · {money(paidSoFar)} paid so far, {money(owed)} remaining</span>
+                          )}
+                        </div>
+                      </div>
+                      {inst.paid && (
+                        <span className="stamp" style={{ color: STAMP_META.paid.color, borderColor: STAMP_META.paid.border, background: STAMP_META.paid.bg }}>
+                          <Check size={11} strokeWidth={2.5} /> Paid
+                        </span>
                       )}
                     </div>
-                  </div>
-                  {inst.paid ? (
-                    <span className="stamp" style={{ color: STAMP_META.paid.color, borderColor: STAMP_META.paid.border, background: STAMP_META.paid.bg }}>
-                      <Check size={11} strokeWidth={2.5} /> Paid
-                    </span>
-                  ) : (
-                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                      <div style={{ display: "flex", border: "1px solid var(--border)", borderRadius: 6, overflow: "hidden" }}>
+                    {!inst.paid && (
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                        <div style={{ display: "flex", border: "1px solid var(--border)", borderRadius: 6, overflow: "hidden" }}>
+                          <button
+                            type="button"
+                            className="btn btn-ghost"
+                            style={{
+                              padding: "4px 8px", fontSize: 11.5, borderRadius: 0,
+                              background: (scheduleMethodByPeriod[inst.period] || "cash") === "cash" ? "var(--highlight)" : "transparent",
+                            }}
+                            onClick={() => setScheduleMethodByPeriod((prev) => ({ ...prev, [inst.period]: "cash" }))}
+                          >
+                            Cash
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-ghost"
+                            style={{
+                              padding: "4px 8px", fontSize: 11.5, borderRadius: 0,
+                              background: scheduleMethodByPeriod[inst.period] === "upi_bank" ? "var(--highlight)" : "transparent",
+                            }}
+                            onClick={() => setScheduleMethodByPeriod((prev) => ({ ...prev, [inst.period]: "upi_bank" }))}
+                          >
+                            UPI / Bank
+                          </button>
+                        </div>
+                        <input
+                          type="number"
+                          value={amountValue}
+                          onChange={(e) => setScheduleAmountByPeriod((prev) => ({ ...prev, [inst.period]: e.target.value }))}
+                          style={{ width: 88, padding: "4px 8px", fontSize: 12.5, border: "1px solid var(--border)", borderRadius: 6 }}
+                          title="Amount received — any excess over what's owed this month rolls over to the next unpaid month"
+                        />
                         <button
-                          type="button"
-                          className="btn btn-ghost"
-                          style={{
-                            padding: "4px 8px", fontSize: 11.5, borderRadius: 0,
-                            background: (scheduleMethodByPeriod[inst.period] || "cash") === "cash" ? "var(--highlight)" : "transparent",
+                          className="btn btn-primary"
+                          onClick={() => {
+                            recordInstallmentPayment(scheduleStudent.id, inst.period, Number(amountValue));
+                            setScheduleAmountByPeriod((prev) => { const next = { ...prev }; delete next[inst.period]; return next; });
                           }}
-                          onClick={() => setScheduleMethodByPeriod((prev) => ({ ...prev, [inst.period]: "cash" }))}
                         >
-                          Cash
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btn-ghost"
-                          style={{
-                            padding: "4px 8px", fontSize: 11.5, borderRadius: 0,
-                            background: scheduleMethodByPeriod[inst.period] === "upi_bank" ? "var(--highlight)" : "transparent",
-                          }}
-                          onClick={() => setScheduleMethodByPeriod((prev) => ({ ...prev, [inst.period]: "upi_bank" }))}
-                        >
-                          UPI / Bank
+                          <Check size={14} /> Record payment
                         </button>
                       </div>
-                      <button className="btn btn-primary" onClick={() => markInstallmentPaid(scheduleStudent.id, inst.period, scheduleMethodByPeriod[inst.period] || "cash")}>
-                        <Check size={14} /> Mark paid
-                      </button>
-                    </div>
-                  )}
-                </div>
-              ))}
+                    )}
+                  </div>
+                );
+              })}
             </div>
             {!isCollector && (
               <button className="btn btn-ghost" style={{ width: "100%", justifyContent: "center" }} onClick={() => regenerateSchedule(scheduleStudent.id)}>
