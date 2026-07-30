@@ -364,19 +364,23 @@ app.post("/api/students/:id/annual-fee/reset", requireAuth, requireAdmin, h(asyn
   res.json(updated);
 }));
 
-// Atomic — marks exactly one installment paid without the client ever sending back
-// the whole installments array, so two people acting on the same student at once
-// can't silently overwrite each other's change (see db.js for the locking detail).
+// Records a payment against one installment period — supports partial amounts,
+// with any overflow automatically rolling forward onto the next unpaid period(s)
+// (see recordInstallmentPayment in db.js). Atomic/row-locked for the same
+// concurrent-edit reason as before.
 app.post("/api/students/:id/installments/:period/pay", requireAuth, h(async (req, res) => {
   const all = await db.getStudents();
   const existing = all.find((s) => s.id === req.params.id);
   if (!existing) return res.status(404).json({ error: "Student not found" });
   if (!assertSchoolAllowed(req, res, existing.school)) return;
   const method = req.body.method === "upi_bank" ? "upi_bank" : "cash";
-  const result = await db.markInstallmentPaid(req.params.id, req.params.period, method, req.user.name || req.user.email);
+  const amount = req.body.amount != null ? Number(req.body.amount) : undefined;
+  if (amount != null && (!amount || amount <= 0)) return res.status(400).json({ error: "amount must be a positive number" });
+  const result = await db.recordInstallmentPayment(req.params.id, req.params.period, amount, method, req.user.name || req.user.email);
   if (result.error === "not_found") return res.status(404).json({ error: "Student not found" });
   if (result.error === "period_not_found") return res.status(404).json({ error: "That installment doesn't exist on this student" });
-  res.json(result.student);
+  if (result.error === "invalid_amount") return res.status(400).json({ error: "amount must be a positive number" });
+  res.json({ ...result.student, leftoverUnapplied: result.leftoverUnapplied || 0 });
 }));
 
 // Also atomic — rebuilds the schedule server-side (same lock pattern) instead of
