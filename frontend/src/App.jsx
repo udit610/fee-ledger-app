@@ -338,8 +338,7 @@ function StampBadge({ status }) {
 // due, all rolled into one figure — instead of just the single next-due period.
 function defaultTemplate(student) {
   const totalPending = computeTotalPending(student);
-  const asOf = monthYearLabel(todayISO());
-  return `Dear Parent, this is an automated reminder from ${student.school} that the total pending fee for ${student.name} (${student.cls}) up to date is ${money(totalPending)} (including overdue dues up to ${asOf}). Kindly pay at the earliest to avoid late charges. Thank you.`;
+  return `Dear Parent, this is a reminder from ${student.school} that the total pending fee for ${student.name} (${student.cls}) up to date is ${money(totalPending)}. Kindly pay at the earliest. Thank you.`;
 }
 
 function initials(name) {
