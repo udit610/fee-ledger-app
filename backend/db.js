@@ -56,6 +56,7 @@ async function init() {
       session_year INTEGER,
       previous_session_due NUMERIC NOT NULL DEFAULT 0,
       previous_session_payments JSONB DEFAULT '[]'::jsonb,
+      join_month INTEGER,
       created_at TIMESTAMPTZ DEFAULT now()
     );
   `);
@@ -72,6 +73,10 @@ async function init() {
   await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS annual_fee_amount NUMERIC DEFAULT 0;`);
   await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS annual_fee_paid NUMERIC NOT NULL DEFAULT 0;`);
   await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS annual_fee_payments JSONB DEFAULT '[]'::jsonb;`);
+  // NULL means "no restriction" — the student's monthly/quarterly schedule runs
+  // the full academic year (April start), exactly as it always has. Only set
+  // when a student joins mid-year and should be billed starting from that month.
+  await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS join_month INTEGER;`);
   // session_year needs special care: on a brand-new table it's fine to leave it
   // NULL (addStudent always sets it going forward). But on an EXISTING database,
   // adding this column with no value would make every existing student look like
@@ -168,6 +173,7 @@ function toStudent(row) {
     sessionYear: row.session_year,
     previousSessionDue: Number(row.previous_session_due) || 0,
     previousSessionPayments: row.previous_session_payments || [],
+    joinMonth: row.join_month != null ? Number(row.join_month) : null,
   };
 }
 
@@ -260,13 +266,38 @@ function instPaidAmount(inst) {
   return inst.paid ? Number(inst.amount) || 0 : 0;
 }
 
-function generateInstallments(frequency, startDue, amount) {
+// Position of a calendar month (1-12) within the April-start academic year:
+// April -> 1, ... December -> 9, January -> 10, ... March -> 12.
+function academicPosition(monthNum) {
+  return monthNum >= 4 ? monthNum - 3 : monthNum + 9;
+}
+
+// Drops any academic-year term that falls before joinMonth (e.g. joinMonth=8
+// keeps [8,9,10,11,12,1,2,3] out of the full monthly list) — this is how a
+// mid-year joiner ends up billed for fewer months instead of all 12. A falsy
+// joinMonth (the common case — student was there from the start of the
+// session) returns the full list unchanged, so existing behavior is unaffected.
+function filterMonthsFromJoin(months, joinMonth) {
+  if (!joinMonth) return months;
+  const startPos = academicPosition(joinMonth);
+  return months.filter((m) => academicPosition(m) >= startPos);
+}
+
+function generateInstallments(frequency, startDue, amount, joinMonth) {
   const cfg = FREQ_CONFIG[frequency] || FREQ_CONFIG.monthly;
-  const academicMonths = ACADEMIC_MONTHS[frequency];
+  const allMonths = ACADEMIC_MONTHS[frequency];
   const amt = Number(amount) || 0;
+  if (allMonths) {
+    const months = filterMonthsFromJoin(allMonths, joinMonth);
+    return months.map((m, i) => {
+      const due = academicYearAnchorDue(startDue, m);
+      const period = cfg === FREQ_CONFIG.monthly ? monthYearLabel(due) : `${cfg.label} ${i + 1} · ${monthYearLabel(due)}`;
+      return { period, due, amount: amt, paid: false, paidDate: null, paidAmount: 0 };
+    });
+  }
   return Array.from({ length: cfg.count }, (_, i) => {
-    const due = academicMonths ? academicYearAnchorDue(startDue, academicMonths[i]) : addMonths(startDue, i * cfg.monthsApart);
-    const period = cfg === FREQ_CONFIG.monthly ? monthYearLabel(due) : `${cfg.label} ${i + 1} · ${monthYearLabel(due)}`;
+    const due = addMonths(startDue, i * cfg.monthsApart);
+    const period = `${cfg.label} ${i + 1} · ${monthYearLabel(due)}`;
     return { period, due, amount: amt, paid: false, paidDate: null, paidAmount: 0 };
   });
 }
@@ -281,8 +312,8 @@ export const db = {
   async addStudent(student) {
     await ready;
     const { rows } = await pool.query(
-      `INSERT INTO students (id, name, cls, school, phone, father_name, total, paid, due, plan_type, frequency, installment_amount, installments, payments, history, transport_rate, transport_months, transport_paid, transport_payments, session_year, previous_session_due, previous_session_payments, annual_fee_amount, annual_fee_paid, annual_fee_payments)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
+      `INSERT INTO students (id, name, cls, school, phone, father_name, total, paid, due, plan_type, frequency, installment_amount, installments, payments, history, transport_rate, transport_months, transport_paid, transport_payments, session_year, previous_session_due, previous_session_payments, annual_fee_amount, annual_fee_paid, annual_fee_payments, join_month)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
        RETURNING *`,
       [
         student.id, student.name, student.cls, student.school, student.phone || "", student.fatherName || "",
@@ -302,6 +333,7 @@ export const db = {
         student.annualFeeAmount || 0,
         student.annualFeePaid || 0,
         JSON.stringify(student.annualFeePayments || []),
+        student.joinMonth || null,
       ]
     );
     return toStudent(rows[0]);
@@ -329,6 +361,7 @@ export const db = {
       transportRate: "transport_rate",
       annualFeeAmount: "annual_fee_amount",
       previousSessionDue: "previous_session_due",
+      joinMonth: "join_month",
     };
     const jsonFields = new Set(["installments", "payments", "history"]);
     const sets = [];
@@ -628,7 +661,7 @@ export const db = {
         return { error: "not_installment_plan" };
       }
       const startDue = s.due || (s.installments && s.installments[0] && s.installments[0].due);
-      const installments = generateInstallments(s.frequency, startDue, s.installmentAmount);
+      const installments = generateInstallments(s.frequency, startDue, s.installmentAmount, s.joinMonth);
       const total = installments.reduce((a, i) => a + Number(i.amount || 0), 0);
       const { rows: updated } = await client.query(
         "UPDATE students SET installments = $1, total = $2, paid = 0, payments = '[]' WHERE id = $3 RETURNING *",
