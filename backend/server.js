@@ -172,7 +172,7 @@ app.get("/api/students", requireAuth, h(async (req, res) => {
 }));
 
 app.post("/api/students", requireAuth, requireAdmin, h(async (req, res) => {
-  const { name, cls, school, phone, fatherName, total, paid, due, planType, frequency, installmentAmount, installments, transportRate, annualFeeAmount } = req.body;
+  const { name, cls, school, phone, fatherName, total, paid, due, planType, frequency, installmentAmount, installments, transportRate, annualFeeAmount, joinMonth } = req.body;
   if (!name || !total || !due) return res.status(400).json({ error: "name, total, and due are required" });
   if (!assertSchoolAllowed(req, res, school)) return;
   const student = {
@@ -193,6 +193,7 @@ app.post("/api/students", requireAuth, requireAdmin, h(async (req, res) => {
     history: [{ field: "created", oldValue: null, newValue: null, by: req.user.name || req.user.email, at: new Date().toISOString() }],
     transportRate: Number(transportRate) || 0,
     annualFeeAmount: Number(annualFeeAmount) || 0,
+    joinMonth: joinMonth != null && joinMonth !== "" ? Number(joinMonth) : null,
   };
   res.status(201).json(await db.addStudent(student));
 }));
@@ -227,7 +228,7 @@ app.post("/api/students/bulk-import", requireAuth, requireAdmin, h(async (req, r
 }));
 
 // Fields worth tracking in the audit trail. Noisy/bulky fields (installments, payments) are excluded.
-const AUDIT_FIELDS = ["name", "cls", "school", "phone", "fatherName", "total", "paid", "due", "planType", "frequency", "installmentAmount", "transportRate", "annualFeeAmount", "previousSessionDue"];
+const AUDIT_FIELDS = ["name", "cls", "school", "phone", "fatherName", "total", "paid", "due", "planType", "frequency", "installmentAmount", "transportRate", "annualFeeAmount", "previousSessionDue", "joinMonth"];
 
 function maxAllowedExpenseDate() {
   return new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
@@ -243,6 +244,7 @@ app.put("/api/students/:id", requireAuth, requireAdmin, h(async (req, res) => {
   const patch = { ...req.body };
   if (patch.total != null) patch.total = Number(patch.total);
   if (patch.paid != null) patch.paid = Number(patch.paid);
+  if ("joinMonth" in patch) patch.joinMonth = patch.joinMonth != null && patch.joinMonth !== "" ? Number(patch.joinMonth) : null;
 
   const changes = [];
   const now = new Date().toISOString();
