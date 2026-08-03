@@ -143,19 +143,54 @@ function monthYearLabel(dateStr) {
   return d.toLocaleDateString("en-US", { month: "long", year: "numeric" });
 }
 
+// Position of a calendar month (1-12) within the April-start academic year:
+// April -> 1, ... December -> 9, January -> 10, ... March -> 12.
+function academicPosition(monthNum) {
+  return monthNum >= 4 ? monthNum - 3 : monthNum + 9;
+}
+
+// Drops any academic-year term that falls before joinMonth (e.g. joinMonth=8,
+// August, keeps [8,9,10,11,12,1,2,3] out of the full monthly list) — this is
+// how a mid-year joiner ends up billed for fewer months instead of all 12.
+// A falsy joinMonth (the common case) returns the full list unchanged, so a
+// student with no joinMonth set behaves exactly as before.
+function filterMonthsFromJoin(months, joinMonth) {
+  if (!joinMonth) return months;
+  const startPos = academicPosition(joinMonth);
+  return months.filter((m) => academicPosition(m) >= startPos);
+}
+
+// Options for the "Joining month" selector — blank means "full academic year
+// (starts April)"; the rest let a mid-year joiner's schedule start later.
+const JOIN_MONTH_OPTIONS = [
+  { value: "", label: "Full academic year (from April)" },
+  ...ACADEMIC_MONTHS.monthly.map((m) => ({ value: String(m), label: new Date(2000, m - 1, 1).toLocaleDateString("en-US", { month: "long" }) })),
+];
+
 // Pure function: builds an installment schedule. frequency drives count/spacing.
 // Quarterly/biannual snap onto fixed academic-year terms; monthly stays purely
 // sequential from startDue (there's no fixed-term concept for a monthly cadence).
-function generateInstallments(planType, frequency, startDue, amount) {
+// joinMonth (1-12, optional) trims off any term before that month, for a
+// student who joined partway through the academic year and shouldn't be
+// charged for the months before they arrived.
+function generateInstallments(planType, frequency, startDue, amount, joinMonth) {
   const cfg = FREQ_CONFIG[frequency] || FREQ_CONFIG.monthly;
-  const academicMonths = ACADEMIC_MONTHS[frequency];
+  const allMonths = ACADEMIC_MONTHS[frequency];
   const amt = Number(amount) || 0;
+  if (allMonths) {
+    const months = filterMonthsFromJoin(allMonths, joinMonth);
+    return months.map((m, i) => {
+      const due = academicYearAnchorDue(startDue, m);
+      // Monthly installments are just labeled by their calendar month ("June 2026").
+      // Quarterly/biannual keep their period number too, since one calendar month
+      // alone doesn't convey "this is installment 2 of 4".
+      const period = cfg === FREQ_CONFIG.monthly ? monthYearLabel(due) : `${cfg.label} ${i + 1} · ${monthYearLabel(due)}`;
+      return { period, due, amount: amt, paid: false, paidDate: null };
+    });
+  }
   return Array.from({ length: cfg.count }, (_, i) => {
-    const due = academicMonths ? academicYearAnchorDue(startDue, academicMonths[i]) : addMonths(startDue, i * cfg.monthsApart);
-    // Monthly installments are just labeled by their calendar month ("June 2026").
-    // Quarterly/biannual keep their period number too, since one calendar month
-    // alone doesn't convey "this is installment 2 of 4".
-    const period = cfg === FREQ_CONFIG.monthly ? monthYearLabel(due) : `${cfg.label} ${i + 1} · ${monthYearLabel(due)}`;
+    const due = addMonths(startDue, i * cfg.monthsApart);
+    const period = `${cfg.label} ${i + 1} · ${monthYearLabel(due)}`;
     return { period, due, amount: amt, paid: false, paidDate: null };
   });
 }
@@ -625,7 +660,7 @@ function FeeLedger({ user, onLogout }) {
   const [previousSessionStudentId, setPreviousSessionStudentId] = useState(null);
   const [editingId, setEditingId] = useState(null);
   const [savingStudent, setSavingStudent] = useState(false);
-  const [newStudent, setNewStudent] = useState({ name: "", cls: "", school: allowedSchools[0], phone: "", fatherName: "", transportRate: "", annualFeeAmount: "", total: "", paid: "", due: "", planSelect: "full", installmentAmount: "" });
+  const [newStudent, setNewStudent] = useState({ name: "", cls: "", school: allowedSchools[0], phone: "", fatherName: "", transportRate: "", annualFeeAmount: "", total: "", paid: "", due: "", planSelect: "full", installmentAmount: "", joinMonth: "" });
   const [showImport, setShowImport] = useState(false);
   const [importRows, setImportRows] = useState(null);
   const [importFileName, setImportFileName] = useState("");
@@ -1028,9 +1063,10 @@ function FeeLedger({ user, onLogout }) {
       }
     } else if (!editingId) {
       // New installment-plan student: generate the schedule now.
-      const installments = generateInstallments(plan.planType, plan.frequency, newStudent.due, newStudent.installmentAmount);
+      const joinMonth = newStudent.joinMonth ? Number(newStudent.joinMonth) : null;
+      const installments = generateInstallments(plan.planType, plan.frequency, newStudent.due, newStudent.installmentAmount, joinMonth);
       const total = installments.reduce((a, i) => a + Number(i.amount || 0), 0);
-      payload = { ...base, planType: plan.planType, frequency: plan.frequency, installmentAmount: Number(newStudent.installmentAmount), due: newStudent.due, total, paid: 0, installments };
+      payload = { ...base, planType: plan.planType, frequency: plan.frequency, installmentAmount: Number(newStudent.installmentAmount), due: newStudent.due, total, paid: 0, installments, joinMonth };
     } else {
       // Editing an existing installment-plan student. If the plan type, frequency,
       // amount, or start date actually changed, the old schedule no longer matches
@@ -1042,20 +1078,22 @@ function FeeLedger({ user, onLogout }) {
       // schedule and paid marks untouched.
       const original = students.find((x) => x.id === editingId);
       const newAmount = Number(newStudent.installmentAmount);
+      const newJoinMonth = newStudent.joinMonth ? Number(newStudent.joinMonth) : null;
       const planChanged =
         !original ||
         original.planType !== plan.planType ||
         original.frequency !== plan.frequency ||
         Number(original.installmentAmount) !== newAmount ||
-        original.due !== newStudent.due;
+        original.due !== newStudent.due ||
+        (original.joinMonth || null) !== newJoinMonth;
 
       if (planChanged) {
-        if (!window.confirm("Changing the plan type, amount, or start date rebuilds the payment schedule and clears any paid marks. Continue?")) {
+        if (!window.confirm("Changing the plan type, amount, start date, or joining month rebuilds the payment schedule and clears any paid marks. Continue?")) {
           return;
         }
-        const installments = generateInstallments(plan.planType, plan.frequency, newStudent.due, newStudent.installmentAmount);
+        const installments = generateInstallments(plan.planType, plan.frequency, newStudent.due, newStudent.installmentAmount, newJoinMonth);
         const total = installments.reduce((a, i) => a + Number(i.amount || 0), 0);
-        payload = { ...base, planType: plan.planType, frequency: plan.frequency, installmentAmount: newAmount, due: newStudent.due, total, paid: 0, installments, payments: [] };
+        payload = { ...base, planType: plan.planType, frequency: plan.frequency, installmentAmount: newAmount, due: newStudent.due, total, paid: 0, installments, payments: [], joinMonth: newJoinMonth };
       } else {
         payload = { ...base, planType: plan.planType, frequency: plan.frequency, installmentAmount: newAmount };
       }
@@ -1096,6 +1134,7 @@ function FeeLedger({ user, onLogout }) {
       total: String(s.total), paid: String(s.paid), due: firstDue,
       planSelect: planSelectValue(s.planType, s.frequency),
       installmentAmount: s.installmentAmount ? String(s.installmentAmount) : "",
+      joinMonth: s.joinMonth ? String(s.joinMonth) : "",
     });
     setShowAdd(true);
   }
@@ -1949,7 +1988,16 @@ function FeeLedger({ user, onLogout }) {
                   <input type="number" value={newStudent.installmentAmount} onChange={(e) => setNewStudent({ ...newStudent, installmentAmount: e.target.value })} />
                 </div>
                 <div className="field"><label>First installment due date</label><input type="date" value={newStudent.due} onChange={(e) => setNewStudent({ ...newStudent, due: e.target.value })} /></div>
-                {editingId && <p style={{ fontSize: 12, color: "var(--text-mute)", marginTop: -4, marginBottom: 12 }}>Changing the plan type, amount, or start date here rebuilds the payment schedule and clears paid marks. Other edits (name, class, phone) leave the schedule untouched.</p>}
+                <div className="field">
+                  <label>Joining month</label>
+                  <select value={newStudent.joinMonth} onChange={(e) => setNewStudent({ ...newStudent, joinMonth: e.target.value })}>
+                    {JOIN_MONTH_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  </select>
+                  <p style={{ fontSize: 12, color: "var(--text-mute)", marginTop: 4, marginBottom: 0 }}>
+                    If a student joins partway through the year, pick the month they joined — the schedule (and total) will only cover months from then through March, instead of the full year.
+                  </p>
+                </div>
+                {editingId && <p style={{ fontSize: 12, color: "var(--text-mute)", marginTop: -4, marginBottom: 12 }}>Changing the plan type, amount, start date, or joining month here rebuilds the payment schedule and clears paid marks. Other edits (name, class, phone) leave the schedule untouched.</p>}
               </>
             )}
             <button className="btn btn-primary" style={{ width: "100%", justifyContent: "center", opacity: savingStudent ? 0.6 : 1 }} disabled={savingStudent} onClick={saveStudent}>{savingStudent ? "Saving…" : editingId ? "Save changes" : "Add to ledger"}</button>
