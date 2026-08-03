@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useMemo, useRef } from "react";
+import React, { useState, useEffect, useMemo, useRef, useLayoutEffect } from "react";
+import { createPortal } from "react-dom";
 import { Search, Plus, MessageCircle, X, Check, Clock, AlertTriangle, IndianRupee, Send, History, Trash2, Upload, Download, FileSpreadsheet, AlertCircle, Pencil, LogOut, ChevronDown, ChevronLeft, ChevronRight, BarChart3, DatabaseBackup, Sun, Moon, Bus, CalendarClock } from "lucide-react";
 import * as XLSX from "xlsx";
 import { api } from "./api.js";
@@ -548,24 +549,81 @@ function GoogleGate({ onLoggedIn, notice }) {
 // list regardless of theme). This reuses the same dropdown-wrap/menu/item styling
 // already used for the "All Schools" selector, so it matches the rest of the UI in
 // both light and dark mode.
+// Positions a popup menu (dropdown list, date picker, etc.) against a trigger
+// element using position: fixed + a portal to document.body, instead of the
+// menu living inside whatever scrollable container the trigger happens to be
+// in (e.g. a modal with overflow:auto). An absolutely-positioned menu nested
+// inside an overflow:auto ancestor still counts toward that ancestor's
+// scrollable content size, so opening it made the modal "grow" and scroll
+// down to reveal it. Rendering it in a portal with fixed coordinates instead
+// makes it float over the page without affecting any container's scroll
+// height, and this hook also flips it above the trigger and clamps it
+// horizontally when there isn't room below/to the right.
+function useAnchoredMenuStyle(open, triggerRef, menuRef, { matchTriggerWidth = false, minWidth } = {}) {
+  const [style, setStyle] = useState(null);
+  useLayoutEffect(() => {
+    if (!open) { setStyle(null); return; }
+    function update() {
+      const trigger = triggerRef.current;
+      if (!trigger) return;
+      const rect = trigger.getBoundingClientRect();
+      const menuEl = menuRef.current;
+      const menuHeight = menuEl ? menuEl.offsetHeight : 0;
+      const menuWidth = menuEl ? menuEl.offsetWidth : (minWidth || rect.width);
+      const viewportH = window.innerHeight;
+      const viewportW = window.innerWidth;
+      const spaceBelow = viewportH - rect.bottom;
+      const openAbove = menuHeight > 0 && spaceBelow < menuHeight + 12 && rect.top > menuHeight + 12;
+      let top = openAbove ? rect.top - menuHeight - 6 : rect.bottom + 6;
+      top = Math.max(8, Math.min(top, viewportH - 8 - (menuEl ? 0 : 0)));
+      let left = rect.left;
+      if (left + menuWidth > viewportW - 8) left = Math.max(8, viewportW - 8 - menuWidth);
+      setStyle({
+        position: "fixed",
+        top,
+        left,
+        width: matchTriggerWidth ? rect.width : undefined,
+        minWidth,
+        zIndex: 1000,
+      });
+    }
+    update();
+    // Menu height is 0 on the very first measurement (nothing painted yet),
+    // so measure again on the next frame once it has real dimensions.
+    const raf = requestAnimationFrame(update);
+    window.addEventListener("resize", update);
+    document.addEventListener("scroll", update, true);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener("resize", update);
+      document.removeEventListener("scroll", update, true);
+    };
+  }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
+  return style;
+}
+
 function Dropdown({ value, options, onChange, triggerClassName }) {
   const [open, setOpen] = useState(false);
-  const ref = useRef(null);
+  const triggerRef = useRef(null);
+  const menuRef = useRef(null);
+  const style = useAnchoredMenuStyle(open, triggerRef, menuRef, { matchTriggerWidth: true, minWidth: 220 });
   useEffect(() => {
     function onDocClick(e) {
-      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+      if (triggerRef.current && triggerRef.current.contains(e.target)) return;
+      if (menuRef.current && menuRef.current.contains(e.target)) return;
+      setOpen(false);
     }
     document.addEventListener("mousedown", onDocClick);
     return () => document.removeEventListener("mousedown", onDocClick);
   }, []);
   const current = options.find((o) => o.value === value);
   return (
-    <div className="dropdown-wrap" ref={ref}>
-      <button type="button" className={triggerClassName || "pill-select"} onClick={() => setOpen((o) => !o)}>
+    <div className="dropdown-wrap">
+      <button type="button" ref={triggerRef} className={triggerClassName || "pill-select"} onClick={() => setOpen((o) => !o)}>
         {current ? current.label : ""}
       </button>
-      {open && (
-        <div className="dropdown-menu">
+      {open && createPortal(
+        <div className="dropdown-menu" ref={menuRef} style={style || { visibility: "hidden" }}>
           {options.map((o) => (
             <button
               key={o.value}
@@ -577,7 +635,8 @@ function Dropdown({ value, options, onChange, triggerClassName }) {
               {o.value === value && <Check size={14} />}
             </button>
           ))}
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );
@@ -593,11 +652,15 @@ function Dropdown({ value, options, onChange, triggerClassName }) {
 function DatePicker({ value, onChange, max }) {
   const [open, setOpen] = useState(false);
   const [viewDate, setViewDate] = useState(() => (value ? new Date(value + "T00:00:00") : new Date()));
-  const ref = useRef(null);
+  const triggerRef = useRef(null);
+  const menuRef = useRef(null);
+  const style = useAnchoredMenuStyle(open, triggerRef, menuRef, { minWidth: 264 });
 
   useEffect(() => {
     function onDocClick(e) {
-      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+      if (triggerRef.current && triggerRef.current.contains(e.target)) return;
+      if (menuRef.current && menuRef.current.contains(e.target)) return;
+      setOpen(false);
     }
     document.addEventListener("mousedown", onDocClick);
     return () => document.removeEventListener("mousedown", onDocClick);
@@ -632,12 +695,12 @@ function DatePicker({ value, onChange, max }) {
   const label = value ? formatDate(value) : "Select date";
 
   return (
-    <div className="dropdown-wrap" ref={ref}>
-      <button type="button" className="field-select-trigger" onClick={() => setOpen((o) => !o)}>
+    <div className="dropdown-wrap">
+      <button type="button" ref={triggerRef} className="field-select-trigger" onClick={() => setOpen((o) => !o)}>
         <span style={{ color: value ? "var(--ink)" : "var(--text-mute)" }}>{label}</span>
       </button>
-      {open && (
-        <div className="dropdown-menu datepicker-menu">
+      {open && createPortal(
+        <div className="dropdown-menu datepicker-menu" ref={menuRef} style={style || { visibility: "hidden" }}>
           <div className="datepicker-head">
             <button type="button" className="datepicker-nav" onClick={() => setViewDate(new Date(year, month - 1, 1))}><ChevronLeft size={15} /></button>
             <span>{viewDate.toLocaleDateString("en-US", { month: "long", year: "numeric" })}</span>
@@ -669,7 +732,8 @@ function DatePicker({ value, onChange, max }) {
             <button type="button" onClick={() => { onChange(""); setOpen(false); }}>Clear</button>
             <button type="button" onClick={() => { onChange(todayIso); setOpen(false); }}>Today</button>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );
