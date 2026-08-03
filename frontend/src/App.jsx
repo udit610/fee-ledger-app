@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
-import { Search, Plus, MessageCircle, X, Check, Clock, AlertTriangle, IndianRupee, Send, History, Trash2, Upload, Download, FileSpreadsheet, AlertCircle, Pencil, LogOut, ChevronDown, BarChart3, DatabaseBackup, Sun, Moon, Bus, CalendarClock } from "lucide-react";
+import { Search, Plus, MessageCircle, X, Check, Clock, AlertTriangle, IndianRupee, Send, History, Trash2, Upload, Download, FileSpreadsheet, AlertCircle, Pencil, LogOut, ChevronDown, ChevronLeft, ChevronRight, BarChart3, DatabaseBackup, Sun, Moon, Bus, CalendarClock } from "lucide-react";
 import * as XLSX from "xlsx";
 import { api } from "./api.js";
 
@@ -583,7 +583,101 @@ function Dropdown({ value, options, onChange, triggerClassName }) {
   );
 }
 
+// Themed replacement for native <input type="date">: the calendar popup a
+// native date input opens is drawn by the OS/browser (Chrome's own white
+// month-grid), same problem as the native <select> above — it always looks
+// like Chrome, never like the app. This builds an equivalent month-grid
+// popup out of the same button/menu markup, so it matches the theme. Dates
+// are still passed around as plain "YYYY-MM-DD" strings everywhere else in
+// the app, unchanged — this only replaces how the value gets picked.
+function DatePicker({ value, onChange, max }) {
+  const [open, setOpen] = useState(false);
+  const [viewDate, setViewDate] = useState(() => (value ? new Date(value + "T00:00:00") : new Date()));
+  const ref = useRef(null);
+
+  useEffect(() => {
+    function onDocClick(e) {
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+    }
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, []);
+
+  useEffect(() => {
+    if (open) setViewDate(value ? new Date(value + "T00:00:00") : new Date());
+  }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const year = viewDate.getFullYear();
+  const month = viewDate.getMonth(); // 0-indexed
+
+  function toISO(d) {
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  }
+
+  // Monday-first 6-week grid, padded with the trailing days of the previous
+  // month and leading days of the next — same layout as the native picker.
+  const cells = useMemo(() => {
+    const firstOfMonth = new Date(year, month, 1);
+    const startOffset = (firstOfMonth.getDay() + 6) % 7; // Sun=0 -> 6, Mon=1 -> 0, ...
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    const totalCells = Math.ceil((startOffset + daysInMonth) / 7) * 7;
+    return Array.from({ length: totalCells }, (_, i) => {
+      const dayNum = i - startOffset + 1;
+      const dateObj = new Date(year, month, dayNum);
+      return { dateObj, inMonth: dayNum >= 1 && dayNum <= daysInMonth };
+    });
+  }, [year, month]);
+
+  const todayIso = todayISO();
+  const label = value ? formatDate(value) : "Select date";
+
+  return (
+    <div className="dropdown-wrap" ref={ref}>
+      <button type="button" className="field-select-trigger" onClick={() => setOpen((o) => !o)}>
+        <span style={{ color: value ? "var(--ink)" : "var(--text-mute)" }}>{label}</span>
+      </button>
+      {open && (
+        <div className="dropdown-menu datepicker-menu">
+          <div className="datepicker-head">
+            <button type="button" className="datepicker-nav" onClick={() => setViewDate(new Date(year, month - 1, 1))}><ChevronLeft size={15} /></button>
+            <span>{viewDate.toLocaleDateString("en-US", { month: "long", year: "numeric" })}</span>
+            <button type="button" className="datepicker-nav" onClick={() => setViewDate(new Date(year, month + 1, 1))}><ChevronRight size={15} /></button>
+          </div>
+          <div className="datepicker-weekdays">
+            {["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"].map((d) => <span key={d}>{d}</span>)}
+          </div>
+          <div className="datepicker-grid">
+            {cells.map(({ dateObj, inMonth }, i) => {
+              const iso = toISO(dateObj);
+              const disabled = max ? iso > max : false;
+              const isSelected = value === iso;
+              const isToday = iso === todayIso;
+              return (
+                <button
+                  key={i}
+                  type="button"
+                  disabled={disabled}
+                  className={`datepicker-cell ${inMonth ? "" : "muted"} ${isSelected ? "selected" : ""} ${isToday && !isSelected ? "today" : ""}`}
+                  onClick={() => { onChange(iso); setOpen(false); }}
+                >
+                  {dateObj.getDate()}
+                </button>
+              );
+            })}
+          </div>
+          <div className="datepicker-foot">
+            <button type="button" onClick={() => { onChange(""); setOpen(false); }}>Clear</button>
+            <button type="button" onClick={() => { onChange(todayIso); setOpen(false); }}>Today</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function App() {
+
+
   const [user, setUser] = useState(undefined); // undefined = checking, null = signed out
   const [loggedOutReason, setLoggedOutReason] = useState("");
 
@@ -1533,6 +1627,22 @@ function FeeLedger({ user, onLogout }) {
         .field-select-trigger:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-tint); }
         .field-row { display:grid; grid-template-columns: 1fr 1fr; gap:10px; }
 
+        .datepicker-menu { width: 264px; padding: 10px; }
+        .datepicker-head { display:flex; align-items:center; justify-content:space-between; padding: 2px 2px 8px; font-family: var(--display); font-size: 13.5px; font-weight: 700; color: var(--ink); }
+        .datepicker-nav { border:none; background:none; padding:4px; border-radius:4px; color: var(--text-soft); cursor:pointer; display:flex; }
+        .datepicker-nav:hover { background: var(--card-alt); color: var(--ink); }
+        .datepicker-weekdays { display:grid; grid-template-columns: repeat(7, 1fr); text-align:center; font-family: var(--mono); font-size:10px; font-weight:600; color: var(--text-mute); text-transform: uppercase; margin-bottom: 4px; }
+        .datepicker-grid { display:grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
+        .datepicker-cell { border:none; background:none; padding: 7px 0; border-radius:4px; font-size:12.5px; color: var(--ink); cursor:pointer; transition: background 0.1s ease; }
+        .datepicker-cell:hover:not(:disabled) { background: var(--card-alt); }
+        .datepicker-cell.muted { color: var(--text-mute); }
+        .datepicker-cell.today { font-weight: 700; color: var(--accent); }
+        .datepicker-cell.selected { background: var(--accent); color: #fff; font-weight: 600; }
+        .datepicker-cell:disabled { color: var(--text-mute); opacity: 0.4; cursor: not-allowed; }
+        .datepicker-foot { display:flex; justify-content:space-between; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line-soft); }
+        .datepicker-foot button { border:none; background:none; padding: 4px 6px; font-size: 12px; font-weight: 600; color: var(--accent); cursor:pointer; }
+        .datepicker-foot button:hover { text-decoration: underline; }
+
         .reminder-item { border:1.5px solid var(--line-soft); padding:10px 12px; margin-bottom:8px; transition: border-color 0.12s ease; background: var(--card); }
         .reminder-item:hover { border-color: var(--ink); }
         .reminder-item label { display:flex; align-items:flex-start; gap:10px; cursor:pointer; }
@@ -1967,7 +2077,7 @@ function FeeLedger({ user, onLogout }) {
             <div className="field"><label>Student name</label><input value={newStudent.name} onChange={(e) => setNewStudent({ ...newStudent, name: e.target.value })} /></div>
             <div className="field-row">
               <div className="field"><label>Class</label><input value={newStudent.cls} onChange={(e) => setNewStudent({ ...newStudent, cls: e.target.value })} /></div>
-              <div className="field"><label>School</label><select value={newStudent.school} onChange={(e) => setNewStudent({ ...newStudent, school: e.target.value })}>{allowedSchools.map((s) => <option key={s}>{s}</option>)}</select></div>
+              <div className="field"><label>School</label><Dropdown value={newStudent.school} onChange={(v) => setNewStudent({ ...newStudent, school: v })} options={allowedSchools.map((s) => ({ value: s, label: s }))} triggerClassName="field-select-trigger" /></div>
             </div>
             <div className="field"><label>Parent WhatsApp number</label><input value={newStudent.phone} onChange={(e) => setNewStudent({ ...newStudent, phone: e.target.value })} placeholder="98XXXXXXXX" /></div>
             <div className="field"><label>Father's name</label><input value={newStudent.fatherName} onChange={(e) => setNewStudent({ ...newStudent, fatherName: e.target.value })} placeholder="Helps tell apart two students with the same name" /></div>
@@ -1981,9 +2091,7 @@ function FeeLedger({ user, onLogout }) {
             </div>
             <div className="field">
               <label>Payment plan</label>
-              <select value={newStudent.planSelect} onChange={(e) => setNewStudent({ ...newStudent, planSelect: e.target.value })}>
-                {PLAN_SELECT_OPTIONS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
-              </select>
+              <Dropdown value={newStudent.planSelect} onChange={(v) => setNewStudent({ ...newStudent, planSelect: v })} options={PLAN_SELECT_OPTIONS} triggerClassName="field-select-trigger" />
             </div>
             {newStudent.planSelect === "full" ? (
               <>
@@ -1991,7 +2099,7 @@ function FeeLedger({ user, onLogout }) {
                   <div className="field"><label>Total fee (₹)</label><input type="number" value={newStudent.total} onChange={(e) => setNewStudent({ ...newStudent, total: e.target.value })} /></div>
                   <div className="field"><label>Already paid (₹)</label><input type="number" value={newStudent.paid} onChange={(e) => setNewStudent({ ...newStudent, paid: e.target.value })} /></div>
                 </div>
-                <div className="field"><label>Due date</label><input type="date" value={newStudent.due} onChange={(e) => setNewStudent({ ...newStudent, due: e.target.value })} /></div>
+                <div className="field"><label>Due date</label><DatePicker value={newStudent.due} onChange={(v) => setNewStudent({ ...newStudent, due: v })} /></div>
               </>
             ) : (
               <>
@@ -1999,7 +2107,7 @@ function FeeLedger({ user, onLogout }) {
                   <label>{newStudent.planSelect === "monthly" ? "Monthly amount (₹)" : "Quarterly/Biannual amount (₹)"}</label>
                   <input type="number" value={newStudent.installmentAmount} onChange={(e) => setNewStudent({ ...newStudent, installmentAmount: e.target.value })} />
                 </div>
-                <div className="field"><label>First installment due date</label><input type="date" value={newStudent.due} onChange={(e) => setNewStudent({ ...newStudent, due: e.target.value })} /></div>
+                <div className="field"><label>First installment due date</label><DatePicker value={newStudent.due} onChange={(v) => setNewStudent({ ...newStudent, due: v })} /></div>
                 <div className="field">
                   <label>Joining month</label>
                   <Dropdown
@@ -2027,7 +2135,7 @@ function FeeLedger({ user, onLogout }) {
               <div className="modal-title">{editingExpenseId ? "Edit expense" : "Add expense"}</div>
               <button className="icon-btn" onClick={() => { setShowAddExpense(false); setEditingExpenseId(null); }}><X size={16} /></button>
             </div>
-            <div className="field"><label>School</label><select value={newExpense.school} onChange={(e) => setNewExpense({ ...newExpense, school: e.target.value })}>{allowedSchools.map((s) => <option key={s}>{s}</option>)}</select></div>
+            <div className="field"><label>School</label><Dropdown value={newExpense.school} onChange={(v) => setNewExpense({ ...newExpense, school: v })} options={allowedSchools.map((s) => ({ value: s, label: s }))} triggerClassName="field-select-trigger" /></div>
             <div className="field-row">
               <div className="field">
                 <label>Category</label>
@@ -2039,7 +2147,7 @@ function FeeLedger({ user, onLogout }) {
             <div className="field"><label>Description</label><input value={newExpense.description} onChange={(e) => setNewExpense({ ...newExpense, description: e.target.value })} placeholder="What was this for?" /></div>
             <div className="field-row">
               <div className="field"><label>Paid to (optional)</label><input value={newExpense.vendor} onChange={(e) => setNewExpense({ ...newExpense, vendor: e.target.value })} placeholder="Vendor / person" /></div>
-              <div className="field"><label>Date</label><input type="date" max={todayISO()} value={newExpense.date} onChange={(e) => setNewExpense({ ...newExpense, date: e.target.value })} /></div>
+              <div className="field"><label>Date</label><DatePicker value={newExpense.date} onChange={(v) => setNewExpense({ ...newExpense, date: v })} max={todayISO()} /></div>
             </div>
             <button className="btn btn-primary" style={{ width: "100%", justifyContent: "center", opacity: savingExpense ? 0.6 : 1 }} disabled={savingExpense} onClick={saveExpense}>{savingExpense ? "Saving…" : editingExpenseId ? "Save changes" : "Add expense"}</button>
           </div>
