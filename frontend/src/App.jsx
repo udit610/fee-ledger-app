@@ -162,9 +162,12 @@ function filterMonthsFromJoin(months, joinMonth) {
 
 // Options for the "Joining month" selector — blank means "full academic year
 // (starts April)"; the rest let a mid-year joiner's schedule start later.
+// April itself is left out of the list below the default: picking it would
+// produce the exact same schedule as "Full academic year", so there's no
+// reason to offer both.
 const JOIN_MONTH_OPTIONS = [
   { value: "", label: "Full academic year (from April)" },
-  ...ACADEMIC_MONTHS.monthly.map((m) => ({ value: String(m), label: new Date(2000, m - 1, 1).toLocaleDateString("en-US", { month: "long" }) })),
+  ...ACADEMIC_MONTHS.monthly.filter((m) => m !== 4).map((m) => ({ value: String(m), label: new Date(2000, m - 1, 1).toLocaleDateString("en-US", { month: "long" }) })),
 ];
 
 // Pure function: builds an installment schedule. frequency drives count/spacing.
@@ -1519,6 +1522,15 @@ function FeeLedger({ user, onLogout }) {
         .field label { font-family: var(--mono); font-size:10.5px; font-weight:600; text-transform: uppercase; letter-spacing: 0.4px; color:var(--text-mute); display:block; margin-bottom:6px; }
         .field input, .field select { width:100%; border:1.5px solid var(--line-soft); border-radius:0; padding:9px 11px; font-size:14px; font-family: var(--sans); background: var(--card); color: var(--ink); transition: border-color 0.15s ease; }
         .field input:focus, .field select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-tint); }
+        .field .dropdown-wrap { width: 100%; }
+        /* Themed stand-in for a native <select> inside a form field — same box
+           model as .field select above, but the popup list is our own
+           dropdown-menu markup so it picks up the app's theme instead of the
+           OS's native (always-white) option list. */
+        .field-select-trigger { width:100%; text-align:left; display:flex; align-items:center; justify-content:space-between; gap:8px; border:1.5px solid var(--line-soft); border-radius:0; padding:9px 11px; font-size:14px; font-family: var(--sans); background: var(--card); color: var(--ink); cursor:pointer; transition: border-color 0.15s ease; }
+        .field-select-trigger::after { content: ""; flex-shrink:0; width:10px; height:6px; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23514E45' stroke-width='1.4' fill='none'/%3E%3C/svg%3E"); background-repeat:no-repeat; }
+        .field-select-trigger:hover { border-color: var(--ink); }
+        .field-select-trigger:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-tint); }
         .field-row { display:grid; grid-template-columns: 1fr 1fr; gap:10px; }
 
         .reminder-item { border:1.5px solid var(--line-soft); padding:10px 12px; margin-bottom:8px; transition: border-color 0.12s ease; background: var(--card); }
@@ -1990,9 +2002,12 @@ function FeeLedger({ user, onLogout }) {
                 <div className="field"><label>First installment due date</label><input type="date" value={newStudent.due} onChange={(e) => setNewStudent({ ...newStudent, due: e.target.value })} /></div>
                 <div className="field">
                   <label>Joining month</label>
-                  <select value={newStudent.joinMonth} onChange={(e) => setNewStudent({ ...newStudent, joinMonth: e.target.value })}>
-                    {JOIN_MONTH_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-                  </select>
+                  <Dropdown
+                    value={newStudent.joinMonth}
+                    onChange={(v) => setNewStudent({ ...newStudent, joinMonth: v })}
+                    options={JOIN_MONTH_OPTIONS}
+                    triggerClassName="field-select-trigger"
+                  />
                   <p style={{ fontSize: 12, color: "var(--text-mute)", marginTop: 4, marginBottom: 0 }}>
                     If a student joins partway through the year, pick the month they joined — the schedule (and total) will only cover months from then through March, instead of the full year.
                   </p>
