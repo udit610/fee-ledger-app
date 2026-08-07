@@ -524,18 +524,18 @@ function GoogleGate({ onLoggedIn, notice }) {
   }, []);
 
   return (
-    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, background: "#ECFFB6" }}>
+    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, background: "#FBF0E9" }}>
       <style>{`${FONT_IMPORT}`}</style>
-      <div style={{ background: "#fff", border: "1.5px solid #00545F", padding: 32, width: "100%", maxWidth: 340, textAlign: "center", fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, sans-serif" }}>
-        <div style={{ position: "relative", width: 42, height: 42, borderRadius: 4, background: "#00545F", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 18px", fontWeight: 700, fontSize: 14, letterSpacing: -0.2, fontFamily: "'Space Grotesk', sans-serif", overflow: "hidden" }}>
+      <div style={{ background: "#fff", border: "1.5px solid #453027", padding: 32, width: "100%", maxWidth: 340, textAlign: "center", fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, sans-serif" }}>
+        <div style={{ position: "relative", width: 42, height: 42, borderRadius: 4, background: "#161316", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 18px", fontWeight: 700, fontSize: 14, letterSpacing: -0.2, fontFamily: "'Space Grotesk', sans-serif", overflow: "hidden" }}>
           FL
-          <div style={{ position: "absolute", left: 0, right: 0, bottom: 0, height: 3, background: "#D6FB00" }} />
+          <div style={{ position: "absolute", left: 0, right: 0, bottom: 0, height: 3, background: "#FF6D29" }} />
         </div>
-        <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 20, fontWeight: 700, color: "#00545F", marginBottom: 6, letterSpacing: -0.2 }}>Fee Ledger</div>
-        <p style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, color: "#4D8189", marginBottom: 24, lineHeight: 1.6 }}>Sign in with a Google account authorized for this ledger.</p>
+        <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 20, fontWeight: 700, color: "#453027", marginBottom: 6, letterSpacing: -0.2 }}>Fee Ledger</div>
+        <p style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, color: "#8A7166", marginBottom: 24, lineHeight: 1.6 }}>Sign in with a Google account authorized for this ledger.</p>
         <div ref={btnRef} style={{ display: "flex", justifyContent: "center" }} />
         {!GOOGLE_CLIENT_ID && <p style={{ color: "#C4102A", fontSize: 12, marginTop: 14 }}>VITE_GOOGLE_CLIENT_ID is not set — see .env.example</p>}
-        {notice && <p style={{ color: "#4D8189", fontSize: 12.5, marginTop: 14 }}>{notice}</p>}
+        {notice && <p style={{ color: "#8A7166", fontSize: 12.5, marginTop: 14 }}>{notice}</p>}
         {error && <p style={{ color: "#C4102A", fontSize: 12.5, marginTop: 14 }}>{error}</p>}
       </div>
     </div>
@@ -774,7 +774,7 @@ export default function App() {
     };
   }, [user]);
 
-  if (user === undefined) return <div style={{ minHeight: "100vh", background: "#ECFFB6" }} />;
+  if (user === undefined) return <div style={{ minHeight: "100vh", background: "#FBF0E9" }} />;
   if (!user) return <GoogleGate onLoggedIn={(u) => { setLoggedOutReason(""); setUser(u); }} notice={loggedOutReason} />;
   return <FeeLedger user={user} onLogout={() => { api.logout().finally(() => setUser(null)); }} />;
 }
@@ -789,7 +789,7 @@ function FeeLedger({ user, onLogout }) {
   });
   useEffect(() => {
     localStorage.setItem("fee-ledger-theme", darkMode ? "dark" : "light");
-    document.body.style.background = darkMode ? "#00232A" : "#ECFFB6";
+    document.body.style.background = darkMode ? "#161316" : "#FBF0E9";
   }, [darkMode]);
   const [students, setStudents] = useState([]);
   const [reminders, setReminders] = useState([]);
@@ -1512,7 +1512,7 @@ function FeeLedger({ user, onLogout }) {
     }
   }
 
-  if (!loaded) return <div style={{ minHeight: "100vh", background: "#ECFFB6" }} />;
+  if (!loaded) return <div style={{ minHeight: "100vh", background: "#FBF0E9" }} />;
 
   return (
     <div className={`wrap${darkMode ? " dark" : ""}`}>
@@ -1523,32 +1523,32 @@ function FeeLedger({ user, onLogout }) {
           --sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
           --display: 'Space Grotesk', var(--sans);
           --mono: 'IBM Plex Mono', ui-monospace, -apple-system, 'SF Mono', Menlo, monospace;
-          --bg: #ECFFB6; --card: #ffffff; --card-alt: #F2FBD1;
-          --ink: #00545F; --text-soft: #3D7580; --text-mute: #6B98A0;
-          --line: #00545F; --line-soft: #D9EFAF;
-          --surface-hover: #F2FBD1; --row-hover: #F8FFEA;
+          --bg: #FBF0E9; --card: #ffffff; --card-alt: #F5E6DC;
+          --ink: #453027; --text-soft: #7A5C4E; --text-mute: #A68974;
+          --line: #453027; --line-soft: #E8D5C4;
+          --surface-hover: #F5E6DC; --row-hover: #FBF3EC;
           --menu-bg: #ffffff; --stat-bg: #ffffff;
-          --accent: #00545F; --accent-dark: #013640; --accent-hover: #013640; --accent-tint: rgba(0,84,95,0.1);
-          --highlight: #D6FB00; --highlight-ink: #00343D; --highlight-tint: rgba(214,251,0,0.22);
-          --paid: #00545F; --paid-bg: rgba(214,251,0,0.28);
+          --accent: #FF6D29; --accent-dark: #E85A1A; --accent-hover: #E85A1A; --accent-tint: rgba(255,109,41,0.1);
+          --highlight: #FF6D29; --highlight-ink: #ffffff; --highlight-tint: rgba(255,109,41,0.18);
+          --paid: #453027; --paid-bg: rgba(255,109,41,0.16);
           --due: #B8590A; --due-bg: rgba(184,89,10,0.1);
           --over: #C4102A; --over-bg: rgba(196,16,42,0.09);
           --whatsapp: #25D366;
-          --overlay: rgba(0,84,95,0.45);
+          --overlay: rgba(69,48,39,0.45);
         }
         .wrap.dark {
           color-scheme: dark;
-          --bg: #00232A; --card: #013640; --card-alt: #01424E;
-          --ink: #ECFFB6; --text-soft: #B9D98F; --text-mute: #7FA05C;
-          --line: #ECFFB6; --line-soft: #123A42;
-          --surface-hover: #01424E; --row-hover: #012C34;
-          --menu-bg: #013640; --stat-bg: #013640;
-          --accent: #D6FB00; --accent-dark: #B8D900; --accent-hover: #C2E600; --accent-tint: rgba(214,251,0,0.2);
-          --highlight: #D6FB00; --highlight-ink: #1B2400; --highlight-tint: rgba(214,251,0,0.16);
-          --paid: #D6FB00; --paid-bg: rgba(214,251,0,0.14);
+          --bg: #161316; --card: #241C1A; --card-alt: #2D2320;
+          --ink: #FBF0E9; --text-soft: #C9B8AC; --text-mute: #8F7A6E;
+          --line: #FBF0E9; --line-soft: #3A2C27;
+          --surface-hover: #2D2320; --row-hover: #251C19;
+          --menu-bg: #241C1A; --stat-bg: #241C1A;
+          --accent: #FF6D29; --accent-dark: #E85A1A; --accent-hover: #FF7F42; --accent-tint: rgba(255,109,41,0.2);
+          --highlight: #FF6D29; --highlight-ink: #2A1400; --highlight-tint: rgba(255,109,41,0.16);
+          --paid: #FF6D29; --paid-bg: rgba(255,109,41,0.14);
           --due: #FF9F0A; --due-bg: rgba(255,159,10,0.14);
           --over: #FF5C48; --over-bg: rgba(255,92,72,0.14);
-          --overlay: rgba(0,35,42,0.7);
+          --overlay: rgba(22,19,22,0.7);
         }
         @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
 
@@ -1558,12 +1558,12 @@ function FeeLedger({ user, onLogout }) {
         a { color: inherit; }
 
         /* The masthead: a constant black bar in both themes (like a printed ledger's
-           header row), with a single lime rule underneath. It doesn't shift with
+           header row), with a single orange rule underneath. It doesn't shift with
            light/dark mode — it's the one fixed anchor of the brand. */
-        .header { background: #00545F; border-bottom: 3px solid var(--highlight); color: #fff; padding: 20px 24px 18px; position: relative; }
+        .header { background: #161316; border-bottom: 3px solid var(--highlight); color: #fff; padding: 20px 24px 18px; position: relative; }
         .header-top { display:flex; align-items:center; justify-content:space-between; gap: 12px; flex-wrap: wrap; }
         .brand { display:flex; align-items:center; gap:10px; }
-        .brand-mark { width: 34px; height: 34px; border-radius: 4px; background: #fff; color: #00545F; display:flex; align-items:center; justify-content:center; font-family: var(--display); font-weight:700; font-size: 13px; letter-spacing: -0.2px; }
+        .brand-mark { width: 34px; height: 34px; border-radius: 4px; background: #fff; color: #161316; display:flex; align-items:center; justify-content:center; font-family: var(--display); font-weight:700; font-size: 13px; letter-spacing: -0.2px; }
         .brand-title { font-family: var(--display); font-size: 19px; font-weight:700; letter-spacing: -0.2px; color: #fff; }
         .brand-sub { font-family: var(--mono); font-size: 11px; color: rgba(255,255,255,0.5); letter-spacing: 0.2px; margin-top: 2px; }
 
@@ -1626,7 +1626,7 @@ function FeeLedger({ user, onLogout }) {
         .segmented button.active { background: var(--ink); color: var(--bg); }
         .view-tabs { margin-top: 18px; display: inline-flex; background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.22); }
         .view-tabs button { color: rgba(255,255,255,0.6); }
-        .view-tabs button.active { background: var(--highlight); color: #00545F; }
+        .view-tabs button.active { background: var(--highlight); color: #161316; }
 
         .btn { border:none; border-radius:3px; padding:8px 14px; font-size:13.5px; font-weight:700; display:flex; align-items:center; gap:6px; cursor:pointer; white-space:nowrap; transition: opacity 0.12s ease, background 0.15s ease; font-family: var(--sans); }
         .btn:active { opacity: 0.75; }
@@ -1712,9 +1712,9 @@ function FeeLedger({ user, onLogout }) {
         .reminder-item label { display:flex; align-items:flex-start; gap:10px; cursor:pointer; }
         .reminder-msg { font-family: var(--mono); font-size:12px; color:var(--text-soft); margin-top:6px; line-height:1.5; background: var(--card-alt); padding:8px; }
 
-        .toast { position:fixed; bottom:18px; left:50%; transform:translateX(-50%); background: #00545F; color: #fff; padding:11px 18px; border: 1.5px solid var(--highlight); font-size:13.5px; display:flex; align-items:center; gap:8px; z-index:60; animation: toastIn 0.2s cubic-bezier(0.22,1,0.36,1); }
+        .toast { position:fixed; bottom:18px; left:50%; transform:translateX(-50%); background: #161316; color: #fff; padding:11px 18px; border: 1.5px solid var(--highlight); font-size:13.5px; display:flex; align-items:center; gap:8px; z-index:60; animation: toastIn 0.2s cubic-bezier(0.22,1,0.36,1); }
         @keyframes toastIn { from { transform: translate(-50%, 10px); opacity: 0; } to { transform: translate(-50%, 0); opacity: 1; } }
-        .toast.warn { background: #00545F; border-color: var(--due); }
+        .toast.warn { background: #161316; border-color: var(--due); }
         .toast-action { background: rgba(255,255,255,0.16); border:1px solid rgba(255,255,255,0.3); color:#fff; font-weight:600; font-size:12.5px; padding:5px 10px; cursor:pointer; margin-left: 4px; }
         .toast-action:hover { background: rgba(255,255,255,0.26); }
 
