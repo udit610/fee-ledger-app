@@ -843,6 +843,11 @@ function FeeLedger({ user, onLogout }) {
   const [expenseSortBy, setExpenseSortBy] = useState("date");
   const [historyExpense, setHistoryExpense] = useState(null);
 
+  // Activity-log tab state (all-time audit trail of who did what, when)
+  const [activityRange, setActivityRange] = useState("today"); // "today" | "week" | "month" | "year" | "all"
+  const [activityStaffFilter, setActivityStaffFilter] = useState("All Staff");
+  const [activityQuery, setActivityQuery] = useState("");
+
   useEffect(() => {
     function onClickOutside(e) {
       if (schoolMenuRef.current && !schoolMenuRef.current.contains(e.target)) setSchoolMenuOpen(false);
@@ -1027,6 +1032,98 @@ function FeeLedger({ user, onLogout }) {
     });
     return Object.values(groups).sort((a, b) => b.total - a.total);
   }, [expenses, schoolFilter]);
+
+  // ---- Activity log (History tab) ----
+  // Builds one flat, chronological "who did what, when" trail out of data that's
+  // already loaded — no extra API call. Every payment array and the two history[]
+  // arrays (students + expenses) already carry a `by`/timestamp on each entry, so
+  // this just flattens and labels them consistently.
+  const activityLog = useMemo(() => {
+    const pool = schoolFilter === "All Schools" ? students : students.filter((s) => s.school === schoolFilter);
+    const expensePool = schoolFilter === "All Schools" ? expenses : expenses.filter((e) => e.school === schoolFilter);
+    const entries = [];
+
+    pool.forEach((s) => {
+      (s.payments || []).forEach((p) => {
+        entries.push({
+          date: p.date, type: p.note ? "Installment payment" : "Fee payment", icon: "fee",
+          who: s.name, school: s.school, cls: s.cls,
+          detail: p.note ? `Installment: ${p.note}` : (p.method === "upi_bank" ? "UPI / Bank" : "Cash"),
+          amount: p.amount, by: p.by || "—",
+        });
+      });
+      (s.transportPayments || []).forEach((p) => {
+        entries.push({ date: p.date, type: "Transport payment", icon: "transport", who: s.name, school: s.school, cls: s.cls, detail: p.method === "upi_bank" ? "UPI / Bank" : "Cash", amount: p.amount, by: p.by || "—" });
+      });
+      (s.annualFeePayments || []).forEach((p) => {
+        entries.push({ date: p.date, type: "Annual fee payment", icon: "annual", who: s.name, school: s.school, cls: s.cls, detail: p.method === "upi_bank" ? "UPI / Bank" : "Cash", amount: p.amount, by: p.by || "—" });
+      });
+      (s.previousSessionPayments || []).forEach((p) => {
+        entries.push({ date: p.date, type: "Previous session payment", icon: "prevsession", who: s.name, school: s.school, cls: s.cls, detail: p.method === "upi_bank" ? "UPI / Bank" : "Cash", amount: p.amount, by: p.by || "—" });
+      });
+      (s.history || []).forEach((h) => {
+        if (h.field === "created") {
+          entries.push({ date: h.at, type: "Student added", icon: "add", who: s.name, school: s.school, cls: s.cls, detail: "New student record", amount: null, by: h.by || "—" });
+        } else {
+          entries.push({ date: h.at, type: "Student edited", icon: "edit", who: s.name, school: s.school, cls: s.cls, detail: `${h.field}: ${String(h.oldValue ?? "—")} → ${String(h.newValue ?? "—")}`, amount: null, by: h.by || "—" });
+        }
+      });
+    });
+
+    expensePool.forEach((e) => {
+      (e.history || []).forEach((h) => {
+        if (h.field === "created") {
+          entries.push({ date: h.at, type: "Expense added", icon: "add", who: e.category, school: e.school, cls: "", detail: e.description || e.vendor || "—", amount: e.amount, by: h.by || "—" });
+        } else {
+          entries.push({ date: h.at, type: "Expense edited", icon: "edit", who: e.category, school: e.school, cls: "", detail: `${h.field}: ${String(h.oldValue ?? "—")} → ${String(h.newValue ?? "—")}`, amount: null, by: h.by || "—" });
+        }
+      });
+    });
+
+    (schoolFilter === "All Schools" ? reminders : reminders.filter((r) => r.school === schoolFilter)).forEach((r) => {
+      entries.push({ date: r.sentAt, type: "Reminder sent", icon: "reminder", who: r.name, school: r.school, cls: "", detail: `Balance ${money(r.balance)}`, amount: null, by: r.sentBy || "—" });
+    });
+
+    return entries.filter((en) => en.date).sort((a, b) => new Date(b.date) - new Date(a.date));
+  }, [students, expenses, reminders, schoolFilter]);
+
+  const activityStaffList = useMemo(() => {
+    return ["All Staff", ...Array.from(new Set(activityLog.map((en) => en.by).filter((b) => b && b !== "—"))).sort((a, b) => a.localeCompare(b))];
+  }, [activityLog]);
+
+  const filteredActivity = useMemo(() => {
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const rangeStart =
+      activityRange === "today" ? startOfToday :
+      activityRange === "week" ? new Date(startOfToday.getTime() - 6 * 86400000) :
+      activityRange === "month" ? new Date(now.getFullYear(), now.getMonth(), 1) :
+      activityRange === "year" ? new Date(now.getFullYear(), 0, 1) :
+      null; // "all"
+    const q = activityQuery.trim().toLowerCase();
+    return activityLog.filter((en) => {
+      if (rangeStart && new Date(en.date) < rangeStart) return false;
+      if (activityStaffFilter !== "All Staff" && en.by !== activityStaffFilter) return false;
+      if (q && !(`${en.who} ${en.detail} ${en.type}`.toLowerCase().includes(q))) return false;
+      return true;
+    });
+  }, [activityLog, activityRange, activityStaffFilter, activityQuery]);
+
+  function exportActivityLog(list) {
+    const rows = list.map((en) => {
+      const d = new Date(en.date);
+      return {
+        Date: formatDate(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`),
+        Time: d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true }),
+        Type: en.type, School: en.school, "Student / Expense": en.who, Class: en.cls || "",
+        Detail: en.detail, Amount: en.amount ?? "", "Done By": en.by,
+      };
+    });
+    const ws = XLSX.utils.json_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "History");
+    XLSX.writeFile(wb, `activity-history-${activityRange}-${todayISO()}.xlsx`);
+  }
 
   const monthlySeries = useMemo(() => {
     const pool = schoolFilter === "All Schools" ? students : students.filter((s) => s.school === schoolFilter);
@@ -1802,6 +1899,7 @@ function FeeLedger({ user, onLogout }) {
         <div className="segmented view-tabs">
           <button className={view === "ledger" ? "active" : ""} onClick={() => setView("ledger")}>Fee Ledger</button>
           <button className={view === "expenses" ? "active" : ""} onClick={() => setView("expenses")}>Expenses</button>
+          {!isCollector && <button className={view === "history" ? "active" : ""} onClick={() => setView("history")}>History</button>}
         </div>
 
         {view === "ledger" ? (
@@ -1846,7 +1944,7 @@ function FeeLedger({ user, onLogout }) {
               </>
             )}
           </>
-        ) : (
+        ) : view === "expenses" ? (
           !isCollector && (
             <div className="stats-row">
               <div className="stat-card"><div className="stat-label">Total spent</div><div className="stat-value">{money(expenseStats.totalSpent)}</div></div>
@@ -1855,6 +1953,13 @@ function FeeLedger({ user, onLogout }) {
               <div className="stat-card"><div className="stat-label">Categories</div><div className="stat-value">{expenseStats.categories}</div></div>
             </div>
           )
+        ) : (
+          <div className="stats-row">
+            <div className="stat-card"><div className="stat-label">Actions today</div><div className="stat-value">{activityLog.filter((en) => new Date(en.date).toDateString() === new Date().toDateString()).length}</div></div>
+            <div className="stat-card"><div className="stat-label">Actions this month</div><div className="stat-value">{activityLog.filter((en) => monthKey(en.date) === monthKey(todayISO())).length}</div></div>
+            <div className="stat-card"><div className="stat-label">Actions this year</div><div className="stat-value">{activityLog.filter((en) => new Date(en.date).getFullYear() === new Date().getFullYear()).length}</div></div>
+            <div className="stat-card"><div className="stat-label">Staff involved</div><div className="stat-value">{activityStaffList.length - 1}</div></div>
+          </div>
         )}
       </div>
 
@@ -2047,7 +2152,7 @@ function FeeLedger({ user, onLogout }) {
             </div>
           </div>
         </>
-      ) : (
+      ) : view === "expenses" ? (
         <>
           {!isCollector && (
             <div className="note-banner">
@@ -2127,6 +2232,77 @@ function FeeLedger({ user, onLogout }) {
                 </div>
                 );
               })}
+            </div>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="note-banner">
+            Every fee, transport, annual-fee, and previous-session payment; every student and expense edit; and every reminder sent — with who did it and when.
+          </div>
+
+          <div className="toolbar">
+            <div className="toolbar-card">
+              <div className="search-box">
+                <Search size={16} color="var(--text-mute)" />
+                <input placeholder="Search history..." value={activityQuery} onChange={(e) => setActivityQuery(e.target.value)} />
+              </div>
+              <Dropdown
+                value={activityRange}
+                onChange={setActivityRange}
+                options={[
+                  { value: "today", label: "Today" },
+                  { value: "week", label: "Last 7 days" },
+                  { value: "month", label: "This month" },
+                  { value: "year", label: "This year" },
+                  { value: "all", label: "All time" },
+                ]}
+              />
+              {activityStaffList.length > 2 && (
+                <Dropdown
+                  value={activityStaffFilter}
+                  onChange={setActivityStaffFilter}
+                  options={activityStaffList.map((s) => ({ value: s, label: s === "All Staff" ? "All staff" : s }))}
+                />
+              )}
+              <button className="btn btn-ghost" onClick={() => exportActivityLog(filteredActivity)}><Download size={15} /> Export</button>
+            </div>
+          </div>
+
+          <div className="content">
+            <div className="section-label">
+              <span>History — {filteredActivity.length} record{filteredActivity.length !== 1 ? "s" : ""}</span>
+            </div>
+            <div className="ledger">
+              {filteredActivity.length === 0 && (
+                <div className="empty">
+                  <div className="empty-title">{activityLog.length === 0 ? "No activity yet" : "No matches"}</div>
+                  <div className="empty-body">
+                    {activityLog.length === 0 ? "Payments, edits, and reminders will show up here as they happen." : "Try a different date range, staff member, or search."}
+                  </div>
+                </div>
+              )}
+              {filteredActivity.map((en, i) => (
+                <div className="row" key={i} style={{ gridTemplateColumns: "36px 1fr auto" }}>
+                  <div className="avatar" style={{ background: "var(--accent-tint)", color: "var(--accent)" }}>{initials(en.who)}</div>
+                  <div>
+                    <div className="row-name">{en.type} — {en.who}</div>
+                    <div className="row-sub">
+                      {en.detail} · {en.school}{en.cls ? ` · ${en.cls}` : ""} · {formatDateTime(en.date)}
+                    </div>
+                    <div style={{ fontSize: 11, color: "var(--text-mute)", marginTop: 2 }}>
+                      By {en.by}
+                    </div>
+                  </div>
+                  <div className="row-right">
+                    {en.amount != null && (
+                      <div className="amounts">
+                        <div className="amt-balance">{money(en.amount)}</div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         </>
