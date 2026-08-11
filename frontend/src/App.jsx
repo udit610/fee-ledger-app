@@ -775,9 +775,99 @@ export default function App() {
   }, [user]);
 
   if (user === undefined) return <div style={{ minHeight: "100vh", background: "#ECFFB6" }} />;
-  if (!user) return <GoogleGate onLoggedIn={(u) => { setLoggedOutReason(""); setUser(u); }} notice={loggedOutReason} />;
-  return <FeeLedger user={user} onLogout={() => { api.logout().finally(() => setUser(null)); }} />;
+  if (!user) return <><GoogleGate onLoggedIn={(u) => { setLoggedOutReason(""); setUser(u); }} notice={loggedOutReason} /><InstallPrompt /></>;
+  return <><FeeLedger user={user} onLogout={() => { api.logout().finally(() => setUser(null)); }} /><InstallPrompt /></>;
 }
+
+// Prompts a browser visitor to install the PWA. Never shows if the app is
+// already running installed (standalone display mode / iOS home-screen
+// launch) — that's how we keep this "web users only": someone who already
+// added it to their home screen is, from here on, an app user, not a web one.
+function InstallPrompt() {
+  const [deferredPrompt, setDeferredPrompt] = useState(null);
+  const [visible, setVisible] = useState(false);
+  const [isIOS, setIsIOS] = useState(false);
+
+  useEffect(() => {
+    const standalone = window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true;
+    if (standalone) return;
+
+    // Back off for 14 days after a dismissal (or an install/decline) so this
+    // never nags on every single visit.
+    const dismissedAt = Number(localStorage.getItem("installPromptDismissed") || 0);
+    if (Date.now() - dismissedAt < 14 * 24 * 60 * 60 * 1000) return;
+
+    const ua = window.navigator.userAgent;
+    const iOS = /iphone|ipad|ipod/i.test(ua) && !window.MSStream;
+
+    if (iOS) {
+      // iOS Safari never fires beforeinstallprompt — there's no programmatic
+      // install, only the manual Share-sheet route, so show instructions
+      // directly. Skip in-app browsers (e.g. opened from Instagram/X), which
+      // don't expose "Add to Home Screen" at all.
+      const isSafari = /safari/i.test(ua) && !/crios|fxios|edgios|instagram|fban|fbav/i.test(ua);
+      if (isSafari) { setIsIOS(true); setVisible(true); }
+      return;
+    }
+
+    const handler = (e) => {
+      e.preventDefault();
+      setDeferredPrompt(e);
+      setVisible(true);
+    };
+    window.addEventListener("beforeinstallprompt", handler);
+    return () => window.removeEventListener("beforeinstallprompt", handler);
+  }, []);
+
+  useEffect(() => {
+    const onInstalled = () => {
+      setVisible(false);
+      localStorage.setItem("installPromptDismissed", String(Date.now()));
+    };
+    window.addEventListener("appinstalled", onInstalled);
+    return () => window.removeEventListener("appinstalled", onInstalled);
+  }, []);
+
+  function dismiss() {
+    setVisible(false);
+    localStorage.setItem("installPromptDismissed", String(Date.now()));
+  }
+
+  async function install() {
+    if (!deferredPrompt) return;
+    deferredPrompt.prompt();
+    await deferredPrompt.userChoice;
+    setDeferredPrompt(null);
+    setVisible(false);
+    localStorage.setItem("installPromptDismissed", String(Date.now()));
+  }
+
+  if (!visible) return null;
+
+  return (
+    <div className="install-banner">
+      <img className="install-banner-icon" src="/icons/icon-192.png" alt="" width={38} height={38} />
+      <div className="install-banner-text">
+        <div className="install-banner-title">Install Fee Ledger</div>
+        <div className="install-banner-sub">{isIOS ? 'Tap Share, then "Add to Home Screen"' : "Add it to your home screen for one-tap access"}</div>
+      </div>
+      {!isIOS && <button className="install-banner-btn" onClick={install}>Install</button>}
+      <button className="install-banner-close" onClick={dismiss} aria-label="Dismiss"><X size={16} /></button>
+      <style>{`
+        .install-banner { position: fixed; left: 12px; right: 12px; bottom: 12px; z-index: 80; display: flex; align-items: center; gap: 10px; background: #00545F; color: #ECFFB6; border: 1.5px solid #D6FB00; padding: 10px 12px; max-width: 420px; margin: 0 auto; box-shadow: 0 8px 24px rgba(0,0,0,0.25); animation: installBannerIn 0.25s cubic-bezier(0.22,1,0.36,1); }
+        @keyframes installBannerIn { from { transform: translateY(16px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+        .install-banner-icon { border-radius: 8px; flex-shrink: 0; }
+        .install-banner-text { flex: 1; min-width: 0; }
+        .install-banner-title { font-weight: 700; font-size: 13.5px; }
+        .install-banner-sub { font-size: 11.5px; color: rgba(236,255,182,0.65); margin-top: 1px; }
+        .install-banner-btn { background: #D6FB00; color: #00545F; border: none; font-weight: 700; font-size: 12.5px; padding: 7px 12px; cursor: pointer; flex-shrink: 0; }
+        .install-banner-close { background: none; border: none; color: rgba(236,255,182,0.6); cursor: pointer; padding: 4px; flex-shrink: 0; display: flex; }
+        .install-banner-close:hover { color: #ECFFB6; }
+      `}</style>
+    </div>
+  );
+}
+
 
 function FeeLedger({ user, onLogout }) {
   const allowedSchools = user.schools && user.schools.length ? user.schools : SCHOOLS;
@@ -1080,12 +1170,12 @@ function FeeLedger({ user, onLogout }) {
       });
     });
 
-    (schoolFilter === "All Schools" ? reminders : reminders.filter((r) => r.school === schoolFilter)).forEach((r) => {
-      entries.push({ date: r.sentAt, type: "Reminder sent", icon: "reminder", who: r.name, school: r.school, cls: "", detail: `Balance ${money(r.balance)}`, amount: null, by: r.sentBy || "—" });
-    });
+    // Reminder-sent events are intentionally excluded — History is about
+    // account-affecting actions (payments, edits), and reminder volume would
+    // drown those out.
 
     return entries.filter((en) => en.date).sort((a, b) => new Date(b.date) - new Date(a.date));
-  }, [students, expenses, reminders, schoolFilter]);
+  }, [students, expenses, schoolFilter]);
 
   const activityStaffList = useMemo(() => {
     return ["All Staff", ...Array.from(new Set(activityLog.map((en) => en.by).filter((b) => b && b !== "—"))).sort((a, b) => a.localeCompare(b))];
@@ -2238,7 +2328,7 @@ function FeeLedger({ user, onLogout }) {
       ) : (
         <>
           <div className="note-banner">
-            Every fee, transport, annual-fee, and previous-session payment; every student and expense edit; and every reminder sent — with who did it and when.
+            Every fee, transport, annual-fee, and previous-session payment, plus every student and expense edit — with who did it and when.
           </div>
 
           <div className="toolbar">
