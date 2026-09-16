@@ -125,6 +125,24 @@ async function init() {
       data JSONB
     );
   `);
+
+  // Indexes. All of these are IF NOT EXISTS, so they cost one cheap catalog
+  // lookup per boot once they exist.
+  //   *_seq_idx      — every list query is ORDER BY seq DESC; without an index
+  //                    Postgres sorts the whole table on each one.
+  //   *_school_idx   — school-scoped accounts now filter in SQL (WHERE school =
+  //                    ANY(...)) instead of fetching everything and filtering in JS.
+  //   session_year   — ensureSessionRollover probes this on every page load.
+  //   backups        — both the daily-snapshot probe and the 60-snapshot prune
+  //                    order/filter by taken_at.
+  await pool.query(`CREATE INDEX IF NOT EXISTS students_seq_idx ON students (seq DESC);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS students_school_idx ON students (school);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS students_session_year_idx ON students (session_year);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS reminders_seq_idx ON reminders (seq DESC);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS reminders_school_idx ON reminders (school);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS expenses_seq_idx ON expenses (seq DESC);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS expenses_school_idx ON expenses (school);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS backups_taken_at_idx ON backups (taken_at DESC);`);
 }
 
 // Every exported function awaits this first, so the very first request after a
@@ -283,6 +301,32 @@ function filterMonthsFromJoin(months, joinMonth) {
   return months.filter((m) => academicPosition(m) >= startPos);
 }
 
+// Spreads an already-known paid total across a freshly built schedule, in order,
+// so rebuilding a schedule doesn't throw away money the school has actually
+// received. Where a period survives the rebuild under the same label, its real
+// paid date and payer carry over; otherwise `fallbackDate` is used (matching
+// markInstallmentsFromPaidTotal in App.jsx, which the Excel import relies on).
+// Returns what it managed to place and what wouldn't fit — a schedule that
+// shrinks can leave the student genuinely in credit, which is a human decision,
+// not something to silently discard.
+function applyPaidTotal(installments, paidTotal, previous = [], fallbackDate = null) {
+  const priorByPeriod = new Map((previous || []).map((i) => [i.period, i]));
+  let remaining = Number(paidTotal) || 0;
+  const out = installments.map((inst) => {
+    const amount = Number(inst.amount) || 0;
+    if (remaining <= 0.005 || amount <= 0) return inst;
+    const apply = Math.min(amount, remaining);
+    remaining -= apply;
+    const prior = priorByPeriod.get(inst.period);
+    const fullyPaid = apply >= amount - 0.005;
+    const next = { ...inst, paid: fullyPaid, paidAmount: apply };
+    if (fullyPaid) next.paidDate = (prior && prior.paidDate) || fallbackDate;
+    if (prior && prior.paidBy) next.paidBy = prior.paidBy;
+    return next;
+  });
+  return { installments: out, applied: (Number(paidTotal) || 0) - remaining, unapplied: Math.max(0, remaining) };
+}
+
 function generateInstallments(frequency, startDue, amount, joinMonth) {
   const cfg = FREQ_CONFIG[frequency] || FREQ_CONFIG.monthly;
   const allMonths = ACADEMIC_MONTHS[frequency];
@@ -302,53 +346,140 @@ function generateInstallments(frequency, startDue, amount, joinMonth) {
   });
 }
 
+// The full student column list, shared by every insert path (single add, bulk
+// import, backup restore) so they can't drift apart — before this was factored
+// out, the restore path silently omitted join_month and dropped every student's
+// mid-year join month on the way back in.
+const STUDENT_COLUMNS = [
+  "id", "name", "cls", "school", "phone", "father_name", "total", "paid", "due",
+  "plan_type", "frequency", "installment_amount", "installments", "payments", "history",
+  "transport_rate", "transport_months", "transport_paid", "transport_payments",
+  "session_year", "previous_session_due", "previous_session_payments",
+  "annual_fee_amount", "annual_fee_paid", "annual_fee_payments", "join_month",
+];
+
+function studentValues(s) {
+  return [
+    s.id, s.name, s.cls, s.school, s.phone || "", s.fatherName || "",
+    s.total, s.paid || 0, s.due,
+    s.planType || "full", s.frequency || null, s.installmentAmount ?? null,
+    JSON.stringify(s.installments || []),
+    JSON.stringify(s.payments || []),
+    JSON.stringify(s.history || []),
+    s.transportRate || 0,
+    JSON.stringify(s.transportMonths || []),
+    s.transportPaid || 0,
+    JSON.stringify(s.transportPayments || []),
+    s.sessionYear ?? currentAcademicYearStart(),
+    s.previousSessionDue || 0,
+    JSON.stringify(s.previousSessionPayments || []),
+    s.annualFeeAmount || 0,
+    s.annualFeePaid || 0,
+    JSON.stringify(s.annualFeePayments || []),
+    s.joinMonth || null,
+  ];
+}
+
+const EXPENSE_COLUMNS = ["id", "school", "category", "description", "vendor", "amount", "date", "history"];
+
+function expenseValues(e) {
+  return [
+    e.id, e.school, e.category || "Miscellaneous", e.description || "", e.vendor || "",
+    Number(e.amount) || 0, e.date, JSON.stringify(e.history || []),
+  ];
+}
+
+const REMINDER_COLUMNS = ["id", "student_id", "name", "school", "phone", "balance", "message", "sent_at", "sent_by"];
+
+function reminderValues(r) {
+  return [r.id, r.studentId, r.name, r.school, r.phone, r.balance ?? null, r.message, r.sentAt, r.sentBy];
+}
+
+// Postgres caps one statement at 65535 bind parameters. At 26 columns the widest
+// table here could take ~2500 rows per statement; 400 keeps every table well
+// under that ceiling with room to spare if a column is ever added.
+const INSERT_CHUNK_ROWS = 400;
+
+// Renders "($1,$2,$3),($4,$5,$6),..." for a multi-row INSERT of `rowCount` rows
+// of `columnCount` columns each.
+function placeholders(rowCount, columnCount) {
+  const groups = new Array(rowCount);
+  for (let r = 0; r < rowCount; r++) {
+    const params = new Array(columnCount);
+    for (let c = 0; c < columnCount; c++) params[c] = `$${r * columnCount + c + 1}`;
+    groups[r] = `(${params.join(",")})`;
+  }
+  return groups.join(",");
+}
+
+// Inserts many rows using as few statements as the parameter limit allows.
+// Every round trip to a hosted Postgres (Neon and friends) costs real network
+// latency, so a 300-row import goes from 300 sequential round trips to one.
+// `returning` is set only where the caller actually needs the inserted rows back.
+async function insertMany(client, table, columns, rows, valuesOf, { returning = false } = {}) {
+  const out = [];
+  const cols = columns.join(", ");
+  for (let i = 0; i < rows.length; i += INSERT_CHUNK_ROWS) {
+    const chunk = rows.slice(i, i + INSERT_CHUNK_ROWS);
+    const values = [];
+    for (const row of chunk) values.push(...valuesOf(row));
+    const sql =
+      `INSERT INTO ${table} (${cols}) VALUES ${placeholders(chunk.length, columns.length)}` +
+      (returning ? " RETURNING *" : "");
+    const res = await client.query(sql, values);
+    if (returning) out.push(...res.rows);
+  }
+  return out;
+}
+
 export const db = {
-  async getStudents() {
+  // `schools` (optional) scopes the result to a staff account's allowed schools.
+  // Filtering here rather than in the route means a scoped account transfers only
+  // its own rows out of the database instead of the entire table.
+  async getStudents(schools = null) {
     await ready;
-    const { rows } = await pool.query("SELECT * FROM students ORDER BY seq DESC");
+    const { rows } = schools
+      ? await pool.query("SELECT * FROM students WHERE school = ANY($1) ORDER BY seq DESC", [schools])
+      : await pool.query("SELECT * FROM students ORDER BY seq DESC");
     return rows.map(toStudent);
+  },
+
+  // Fetches exactly one student. Routes that need to look up a single record —
+  // to check it exists, to authorize it against the caller's schools, or to diff
+  // it for the audit trail — use this instead of pulling the whole table and
+  // scanning it in JS. Every student row carries payments/history/installments
+  // JSONB blobs, so the difference is a few hundred bytes versus megabytes over
+  // the wire on every write.
+  async getStudentById(id) {
+    await ready;
+    const { rows } = await pool.query("SELECT * FROM students WHERE id = $1", [id]);
+    return rows[0] ? toStudent(rows[0]) : null;
+  },
+
+  // Lighter still: the school-authorization check only ever reads `school`, so
+  // routes that don't otherwise need the record skip the JSONB columns entirely.
+  async getStudentSchool(id) {
+    await ready;
+    const { rows } = await pool.query("SELECT school FROM students WHERE id = $1", [id]);
+    return rows[0] ? rows[0].school : null;
   },
 
   async addStudent(student) {
     await ready;
-    const { rows } = await pool.query(
-      `INSERT INTO students (id, name, cls, school, phone, father_name, total, paid, due, plan_type, frequency, installment_amount, installments, payments, history, transport_rate, transport_months, transport_paid, transport_payments, session_year, previous_session_due, previous_session_payments, annual_fee_amount, annual_fee_paid, annual_fee_payments, join_month)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
-       RETURNING *`,
-      [
-        student.id, student.name, student.cls, student.school, student.phone || "", student.fatherName || "",
-        student.total, student.paid || 0, student.due,
-        student.planType || "full", student.frequency || null,
-        student.installmentAmount ?? null,
-        JSON.stringify(student.installments || []),
-        JSON.stringify(student.payments || []),
-        JSON.stringify(student.history || []),
-        student.transportRate || 0,
-        JSON.stringify(student.transportMonths || []),
-        student.transportPaid || 0,
-        JSON.stringify(student.transportPayments || []),
-        student.sessionYear ?? currentAcademicYearStart(),
-        student.previousSessionDue || 0,
-        JSON.stringify(student.previousSessionPayments || []),
-        student.annualFeeAmount || 0,
-        student.annualFeePaid || 0,
-        JSON.stringify(student.annualFeePayments || []),
-        student.joinMonth || null,
-      ]
-    );
+    const rows = await insertMany(pool, "students", STUDENT_COLUMNS, [student], studentValues, { returning: true });
     return toStudent(rows[0]);
   },
 
   async bulkAddStudents(students) {
     await ready;
-    const created = [];
-    // Sequential inserts on one connection — plenty fast for the batch sizes a
-    // real school import has (tens to low hundreds of rows), and much simpler
-    // than a multi-row VALUES statement for jsonb columns.
-    for (const student of students) {
-      created.push(await db.addStudent(student));
-    }
-    return created;
+    if (!students.length) return [];
+    // One multi-row INSERT per chunk rather than one statement per student. An
+    // Excel import of a few hundred rows used to mean a few hundred sequential
+    // round trips to a hosted database; it's now one or two. Postgres returns
+    // multi-row INSERT ... RETURNING in the order the rows were supplied, so the
+    // caller still gets them back in import order.
+    const rows = await insertMany(pool, "students", STUDENT_COLUMNS, students, studentValues, { returning: true });
+    return rows.map(toStudent);
   },
 
   async updateStudent(id, patch) {
@@ -645,6 +776,15 @@ export const db = {
   // frontend used to compute the new installments array itself and PUT the
   // whole thing back — same lost-update risk as markInstallmentPaid had, just
   // rarer in practice since it's gated behind an explicit confirm dialog.
+  //
+  // Rebuilding the SCHEDULE no longer wipes the PAYMENTS. It used to reset
+  // paid = 0 and payments = '[]', which meant correcting a student's joining
+  // month — the routine reason to rebuild — destroyed the record of every rupee
+  // they had actually handed over, with only a confirm dialog in the way. The
+  // payments log is an audit trail of real money received; the schedule is just
+  // how that money is expected to arrive. Only the latter is derived, so only
+  // the latter is rebuilt: the log is kept intact and the paid total is spread
+  // back across the new periods in order.
   async regenerateSchedule(id) {
     await ready;
     const client = await pool.connect();
@@ -661,14 +801,20 @@ export const db = {
         return { error: "not_installment_plan" };
       }
       const startDue = s.due || (s.installments && s.installments[0] && s.installments[0].due);
-      const installments = generateInstallments(s.frequency, startDue, s.installmentAmount, s.joinMonth);
-      const total = installments.reduce((a, i) => a + Number(i.amount || 0), 0);
+      const fresh = generateInstallments(s.frequency, startDue, s.installmentAmount, s.joinMonth);
+      const total = fresh.reduce((a, i) => a + Number(i.amount || 0), 0);
+      // What's already been paid, taken from the old schedule rather than the
+      // paid column, so a partially-paid period is carried over at its real value.
+      const paidSoFar = (s.installments || []).reduce((a, i) => a + instPaidAmount(i), 0);
+      const { installments, applied, unapplied } = applyPaidTotal(fresh, paidSoFar, s.installments || []);
       const { rows: updated } = await client.query(
-        "UPDATE students SET installments = $1, total = $2, paid = 0, payments = '[]' WHERE id = $3 RETURNING *",
-        [JSON.stringify(installments), total, id]
+        "UPDATE students SET installments = $1, total = $2, paid = $3 WHERE id = $4 RETURNING *",
+        [JSON.stringify(installments), total, applied, id]
       );
       await client.query("COMMIT");
-      return { student: toStudent(updated[0]) };
+      // unapplied > 0 means the new schedule is smaller than what they've paid —
+      // the student is in credit and someone needs to decide what to do about it.
+      return { student: toStudent(updated[0]), unapplied };
     } catch (err) {
       await safeRollback(client);
       throw err;
@@ -682,41 +828,46 @@ export const db = {
     await pool.query("DELETE FROM students WHERE id = $1", [id]);
   },
 
-  async getReminders() {
+  async getReminders(schools = null) {
     await ready;
-    const { rows } = await pool.query("SELECT * FROM reminders ORDER BY seq DESC");
+    const { rows } = schools
+      ? await pool.query("SELECT * FROM reminders WHERE school = ANY($1) ORDER BY seq DESC", [schools])
+      : await pool.query("SELECT * FROM reminders ORDER BY seq DESC");
     return rows.map(toReminder);
   },
 
   async addReminder(reminder) {
     await ready;
-    const { rows } = await pool.query(
-      `INSERT INTO reminders (id, student_id, name, school, phone, balance, message, sent_at, sent_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
-      [reminder.id, reminder.studentId, reminder.name, reminder.school, reminder.phone, reminder.balance ?? null, reminder.message, reminder.sentAt, reminder.sentBy]
-    );
+    const rows = await insertMany(pool, "reminders", REMINDER_COLUMNS, [reminder], reminderValues, { returning: true });
     return toReminder(rows[0]);
   },
 
   // ---------- Expenses ----------
 
-  async getExpenses() {
+  async getExpenses(schools = null) {
     await ready;
-    const { rows } = await pool.query("SELECT * FROM expenses ORDER BY seq DESC");
+    const { rows } = schools
+      ? await pool.query("SELECT * FROM expenses WHERE school = ANY($1) ORDER BY seq DESC", [schools])
+      : await pool.query("SELECT * FROM expenses ORDER BY seq DESC");
     return rows.map(toExpense);
+  },
+
+  // Single-expense equivalents of getStudentById / getStudentSchool above.
+  async getExpenseById(id) {
+    await ready;
+    const { rows } = await pool.query("SELECT * FROM expenses WHERE id = $1", [id]);
+    return rows[0] ? toExpense(rows[0]) : null;
+  },
+
+  async getExpenseSchool(id) {
+    await ready;
+    const { rows } = await pool.query("SELECT school FROM expenses WHERE id = $1", [id]);
+    return rows[0] ? rows[0].school : null;
   },
 
   async addExpense(expense) {
     await ready;
-    const { rows } = await pool.query(
-      `INSERT INTO expenses (id, school, category, description, vendor, amount, date, history)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-      [
-        expense.id, expense.school, expense.category || "Miscellaneous", expense.description || "",
-        expense.vendor || "", Number(expense.amount) || 0, expense.date,
-        JSON.stringify(expense.history || []),
-      ]
-    );
+    const rows = await insertMany(pool, "expenses", EXPENSE_COLUMNS, [expense], expenseValues, { returning: true });
     return toExpense(rows[0]);
   },
 
@@ -750,9 +901,13 @@ export const db = {
 
   async exportAll() {
     await ready;
-    const students = await db.getStudents();
-    const reminders = await db.getReminders();
-    const expenses = await db.getExpenses();
+    // Three independent reads — run them concurrently rather than paying each
+    // one's round-trip latency back to back.
+    const [students, reminders, expenses] = await Promise.all([
+      db.getStudents(),
+      db.getReminders(),
+      db.getExpenses(),
+    ]);
     return { students, reminders, expenses };
   },
 
@@ -776,8 +931,12 @@ export const db = {
   // snapshot per calendar day without needing a separate cron service.
   async ensureDailySnapshot() {
     await ready;
+    // Written as a range test rather than `taken_at::date = now()::date` so it
+    // can actually use backups_taken_at_idx — applying a cast to the column
+    // makes the predicate unindexable and forces a scan of the whole table on
+    // every single page load. Equivalent here, since taken_at is never future-dated.
     const { rows } = await pool.query(
-      "SELECT 1 FROM backups WHERE reason = 'daily' AND taken_at::date = now()::date LIMIT 1"
+      "SELECT 1 FROM backups WHERE reason = 'daily' AND taken_at >= date_trunc('day', now()) LIMIT 1"
     );
     if (rows.length === 0) await db.snapshot("daily");
   },
@@ -797,16 +956,21 @@ export const db = {
     const year = currentAcademicYearStart();
     const { rows } = await pool.query("SELECT id FROM students WHERE session_year < $1", [year]);
     if (rows.length === 0) return;
-    for (const { id } of rows) {
-      const client = await pool.connect();
-      try {
+    // One pooled connection for the whole batch instead of acquiring and releasing
+    // one per student. Each student still gets its own BEGIN/COMMIT, so the row
+    // locks stay as short-lived and independent as before — a slow student can't
+    // hold the others' rows. (The previous per-student version also released the
+    // same client twice whenever it hit the already-rolled-over skip path below,
+    // because the explicit release ran and then the `finally` released it again.)
+    const client = await pool.connect();
+    try {
+      for (const { id } of rows) {
         await client.query("BEGIN");
         const { rows: locked } = await client.query("SELECT * FROM students WHERE id = $1 FOR UPDATE", [id]);
         const s = locked[0];
         if (!s || Number(s.session_year) >= year) {
           // Already rolled over by a concurrent request, or somehow caught up — skip.
           await client.query("COMMIT");
-          client.release();
           continue;
         }
         const leftover = Math.max(0, Number(s.total) - Number(s.paid));
@@ -827,12 +991,12 @@ export const db = {
           [year, newPreviousDue, JSON.stringify(history), id]
         );
         await client.query("COMMIT");
-      } catch (err) {
-        await safeRollback(client);
-        throw err;
-      } finally {
-        client.release();
       }
+    } catch (err) {
+      await safeRollback(client);
+      throw err;
+    } finally {
+      client.release();
     }
   },
 
@@ -862,34 +1026,12 @@ export const db = {
       await client.query("DELETE FROM students");
       await client.query("DELETE FROM reminders");
       await client.query("DELETE FROM expenses");
-      for (const s of students) {
-        await client.query(
-          `INSERT INTO students (id, name, cls, school, phone, father_name, total, paid, due, plan_type, frequency, installment_amount, installments, payments, history, transport_rate, transport_months, transport_paid, transport_payments, session_year, previous_session_due, previous_session_payments, annual_fee_amount, annual_fee_paid, annual_fee_payments)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)`,
-          [
-            s.id, s.name, s.cls, s.school, s.phone || "", s.fatherName || "", s.total, s.paid || 0, s.due,
-            s.planType || "full", s.frequency || null, s.installmentAmount ?? null,
-            JSON.stringify(s.installments || []), JSON.stringify(s.payments || []), JSON.stringify(s.history || []),
-            s.transportRate || 0, JSON.stringify(s.transportMonths || []), s.transportPaid || 0, JSON.stringify(s.transportPayments || []),
-            s.sessionYear ?? currentAcademicYearStart(), s.previousSessionDue || 0, JSON.stringify(s.previousSessionPayments || []),
-            s.annualFeeAmount || 0, s.annualFeePaid || 0, JSON.stringify(s.annualFeePayments || []),
-          ]
-        );
-      }
-      for (const r of reminders) {
-        await client.query(
-          `INSERT INTO reminders (id, student_id, name, school, phone, balance, message, sent_at, sent_by)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-          [r.id, r.studentId, r.name, r.school, r.phone, r.balance ?? null, r.message, r.sentAt, r.sentBy]
-        );
-      }
-      for (const e of expenses) {
-        await client.query(
-          `INSERT INTO expenses (id, school, category, description, vendor, amount, date, history)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-          [e.id, e.school, e.category || "Miscellaneous", e.description || "", e.vendor || "", Number(e.amount) || 0, e.date, JSON.stringify(e.history || [])]
-        );
-      }
+      // Chunked multi-row INSERTs instead of one statement per record. Restoring a
+      // full backup of a few hundred students used to hold a write transaction open
+      // across that many sequential round trips.
+      await insertMany(client, "students", STUDENT_COLUMNS, students, studentValues);
+      await insertMany(client, "reminders", REMINDER_COLUMNS, reminders, reminderValues);
+      await insertMany(client, "expenses", EXPENSE_COLUMNS, expenses, expenseValues);
       await client.query("COMMIT");
     } catch (err) {
       await client.query("ROLLBACK");

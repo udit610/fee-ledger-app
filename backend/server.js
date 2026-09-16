@@ -161,14 +161,30 @@ function assertSchoolAllowed(req, res, school) {
   return true;
 }
 
+// Resolves the single record a :id route acts on, far enough to answer "does it
+// exist?" and "is the caller allowed to touch it?" — and no further. These routes
+// used to load the ENTIRE students (or expenses) table and scan it in JS for one
+// id; since every student row carries payments/history/installments JSONB blobs,
+// that meant pulling the whole ledger across the network on every payment
+// recorded. Now it's one indexed single-column lookup.
+// Returns false once it has already written the 404/403 response.
+async function gateStudent(req, res) {
+  const school = await db.getStudentSchool(req.params.id);
+  if (school === null) {
+    res.status(404).json({ error: "Student not found" });
+    return false;
+  }
+  return assertSchoolAllowed(req, res, school);
+}
+
 // ---------- Students ----------
 
 app.get("/api/students", requireAuth, h(async (req, res) => {
   db.ensureDailySnapshot().catch((err) => console.error("Daily snapshot failed:", err.message)); // fire-and-forget, never blocks the response
   await db.ensureSessionRollover(); // awaited — unlike the snapshot above, students returned below must already reflect this
-  const all = await db.getStudents();
-  const schools = req.user.schools;
-  res.json(schools ? all.filter((s) => schools.includes(s.school)) : all);
+  // School scoping happens in the query now, so a scoped staff account transfers
+  // only its own schools' rows instead of the whole table.
+  res.json(await db.getStudents(req.user.schools));
 }));
 
 app.post("/api/students", requireAuth, requireAdmin, h(async (req, res) => {
@@ -235,8 +251,9 @@ function maxAllowedExpenseDate() {
 }
 
 app.put("/api/students/:id", requireAuth, requireAdmin, h(async (req, res) => {
-  const all = await db.getStudents();
-  const existing = all.find((s) => s.id === req.params.id);
+  // This route genuinely needs the whole record (to diff it for the audit trail
+  // and append to its history), so it fetches the one row rather than the table.
+  const existing = await db.getStudentById(req.params.id);
   if (!existing) return res.status(404).json({ error: "Student not found" });
   if (!assertSchoolAllowed(req, res, existing.school)) return;
   if (req.body.school && !assertSchoolAllowed(req, res, req.body.school)) return;
@@ -261,10 +278,7 @@ app.put("/api/students/:id", requireAuth, requireAdmin, h(async (req, res) => {
 }));
 
 app.post("/api/students/:id/payments", requireAuth, h(async (req, res) => {
-  const all = await db.getStudents();
-  const existing = all.find((s) => s.id === req.params.id);
-  if (!existing) return res.status(404).json({ error: "Student not found" });
-  if (!assertSchoolAllowed(req, res, existing.school)) return;
+  if (!(await gateStudent(req, res))) return;
   const amount = Number(req.body.amount);
   if (!amount || amount <= 0) return res.status(400).json({ error: "amount must be a positive number" });
   const method = req.body.method === "upi_bank" ? "upi_bank" : "cash";
@@ -277,10 +291,7 @@ app.post("/api/students/:id/payments", requireAuth, h(async (req, res) => {
 // ensureSessionRollover in db.js) — same not-admin-gated treatment as fee/transport
 // payments, since recording one is a routine counter action.
 app.post("/api/students/:id/previous-session/payments", requireAuth, h(async (req, res) => {
-  const all = await db.getStudents();
-  const existing = all.find((s) => s.id === req.params.id);
-  if (!existing) return res.status(404).json({ error: "Student not found" });
-  if (!assertSchoolAllowed(req, res, existing.school)) return;
+  if (!(await gateStudent(req, res))) return;
   const amount = Number(req.body.amount);
   if (!amount || amount <= 0) return res.status(400).json({ error: "amount must be a positive number" });
   const method = req.body.method === "upi_bank" ? "upi_bank" : "cash";
@@ -297,10 +308,7 @@ app.post("/api/students/:id/previous-session/payments", requireAuth, h(async (re
 // *rate* (set via the regular student-edit endpoint, which IS admin-gated) is
 // restricted.
 app.post("/api/students/:id/transport/months", requireAuth, h(async (req, res) => {
-  const all = await db.getStudents();
-  const existing = all.find((s) => s.id === req.params.id);
-  if (!existing) return res.status(404).json({ error: "Student not found" });
-  if (!assertSchoolAllowed(req, res, existing.school)) return;
+  if (!(await gateStudent(req, res))) return;
   const month = String(req.body.month || "");
   if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: "month must be in YYYY-MM format" });
   if (month.slice(5, 7) === "06") return res.status(400).json({ error: "No transport charge in June (summer vacation)" });
@@ -314,10 +322,7 @@ app.post("/api/students/:id/transport/months", requireAuth, h(async (req, res) =
 }));
 
 app.post("/api/students/:id/transport/payments", requireAuth, h(async (req, res) => {
-  const all = await db.getStudents();
-  const existing = all.find((s) => s.id === req.params.id);
-  if (!existing) return res.status(404).json({ error: "Student not found" });
-  if (!assertSchoolAllowed(req, res, existing.school)) return;
+  if (!(await gateStudent(req, res))) return;
   const amount = Number(req.body.amount);
   if (!amount || amount <= 0) return res.status(400).json({ error: "amount must be a positive number" });
   const method = req.body.method === "upi_bank" ? "upi_bank" : "cash";
@@ -329,10 +334,7 @@ app.post("/api/students/:id/transport/payments", requireAuth, h(async (req, res)
 // Full reset of a student's transport ledger — admin-only, same destructive-reset
 // pattern as the tuition "Regenerate schedule" route below.
 app.post("/api/students/:id/transport/reset", requireAuth, requireAdmin, h(async (req, res) => {
-  const all = await db.getStudents();
-  const existing = all.find((s) => s.id === req.params.id);
-  if (!existing) return res.status(404).json({ error: "Student not found" });
-  if (!assertSchoolAllowed(req, res, existing.school)) return;
+  if (!(await gateStudent(req, res))) return;
   const updated = await db.resetTransport(req.params.id);
   if (!updated) return res.status(404).json({ error: "Student not found" });
   res.json(updated);
@@ -342,10 +344,7 @@ app.post("/api/students/:id/transport/reset", requireAuth, requireAdmin, h(async
 // not-admin-gated treatment as fee/transport payments for recording a payment,
 // since that's a routine counter action a collector account needs to do too.
 app.post("/api/students/:id/annual-fee/payments", requireAuth, h(async (req, res) => {
-  const all = await db.getStudents();
-  const existing = all.find((s) => s.id === req.params.id);
-  if (!existing) return res.status(404).json({ error: "Student not found" });
-  if (!assertSchoolAllowed(req, res, existing.school)) return;
+  if (!(await gateStudent(req, res))) return;
   const amount = Number(req.body.amount);
   if (!amount || amount <= 0) return res.status(400).json({ error: "amount must be a positive number" });
   const method = req.body.method === "upi_bank" ? "upi_bank" : "cash";
@@ -357,10 +356,7 @@ app.post("/api/students/:id/annual-fee/payments", requireAuth, h(async (req, res
 // Full reset of a student's Annual Fee ledger — admin-only, same destructive-reset
 // pattern as transport/reset above.
 app.post("/api/students/:id/annual-fee/reset", requireAuth, requireAdmin, h(async (req, res) => {
-  const all = await db.getStudents();
-  const existing = all.find((s) => s.id === req.params.id);
-  if (!existing) return res.status(404).json({ error: "Student not found" });
-  if (!assertSchoolAllowed(req, res, existing.school)) return;
+  if (!(await gateStudent(req, res))) return;
   const updated = await db.resetAnnualFee(req.params.id);
   if (!updated) return res.status(404).json({ error: "Student not found" });
   res.json(updated);
@@ -371,10 +367,7 @@ app.post("/api/students/:id/annual-fee/reset", requireAuth, requireAdmin, h(asyn
 // (see recordInstallmentPayment in db.js). Atomic/row-locked for the same
 // concurrent-edit reason as before.
 app.post("/api/students/:id/installments/:period/pay", requireAuth, h(async (req, res) => {
-  const all = await db.getStudents();
-  const existing = all.find((s) => s.id === req.params.id);
-  if (!existing) return res.status(404).json({ error: "Student not found" });
-  if (!assertSchoolAllowed(req, res, existing.school)) return;
+  if (!(await gateStudent(req, res))) return;
   const method = req.body.method === "upi_bank" ? "upi_bank" : "cash";
   const amount = req.body.amount != null ? Number(req.body.amount) : undefined;
   if (amount != null && (!amount || amount <= 0)) return res.status(400).json({ error: "amount must be a positive number" });
@@ -388,20 +381,20 @@ app.post("/api/students/:id/installments/:period/pay", requireAuth, h(async (req
 // Also atomic — rebuilds the schedule server-side (same lock pattern) instead of
 // trusting a client-computed installments array. See db.js for details.
 app.post("/api/students/:id/regenerate-schedule", requireAuth, requireAdmin, h(async (req, res) => {
-  const all = await db.getStudents();
-  const existing = all.find((s) => s.id === req.params.id);
-  if (!existing) return res.status(404).json({ error: "Student not found" });
-  if (!assertSchoolAllowed(req, res, existing.school)) return;
+  if (!(await gateStudent(req, res))) return;
   const result = await db.regenerateSchedule(req.params.id);
   if (result.error === "not_found") return res.status(404).json({ error: "Student not found" });
   if (result.error === "not_installment_plan") return res.status(400).json({ error: "This student isn't on an installment plan" });
-  res.json(result.student);
+  // unapplied: paid money the rebuilt (smaller) schedule had no room for, so the
+  // UI can say so rather than letting it quietly vanish off the balance.
+  res.json({ ...result.student, unapplied: result.unapplied || 0 });
 }));
 
 app.delete("/api/students/:id", requireAuth, requireAdmin, h(async (req, res) => {
-  const all = await db.getStudents();
-  const existing = all.find((s) => s.id === req.params.id);
-  if (existing && !assertSchoolAllowed(req, res, existing.school)) return;
+  // Deliberately not gateStudent: deleting an already-deleted student stays a
+  // no-op success here rather than a 404, exactly as before.
+  const school = await db.getStudentSchool(req.params.id);
+  if (school !== null && !assertSchoolAllowed(req, res, school)) return;
   await db.deleteStudent(req.params.id);
   res.json({ ok: true });
 }));
@@ -409,9 +402,7 @@ app.delete("/api/students/:id", requireAuth, requireAdmin, h(async (req, res) =>
 // ---------- Reminders ----------
 
 app.get("/api/reminders", requireAuth, requireAdmin, h(async (req, res) => {
-  const all = await db.getReminders();
-  const schools = req.user.schools;
-  res.json(schools ? all.filter((r) => schools.includes(r.school)) : all);
+  res.json(await db.getReminders(req.user.schools));
 }));
 
 app.post("/api/reminders", requireAuth, h(async (req, res) => {
@@ -436,9 +427,7 @@ app.post("/api/reminders", requireAuth, h(async (req, res) => {
 const EXPENSE_AUDIT_FIELDS = ["school", "category", "description", "vendor", "amount", "date"];
 
 app.get("/api/expenses", requireAuth, h(async (req, res) => {
-  const all = await db.getExpenses();
-  const schools = req.user.schools;
-  res.json(schools ? all.filter((e) => schools.includes(e.school)) : all);
+  res.json(await db.getExpenses(req.user.schools));
 }));
 
 app.post("/api/expenses", requireAuth, h(async (req, res) => {
@@ -460,8 +449,8 @@ app.post("/api/expenses", requireAuth, h(async (req, res) => {
 }));
 
 app.put("/api/expenses/:id", requireAuth, requireAdmin, h(async (req, res) => {
-  const all = await db.getExpenses();
-  const existing = all.find((e) => e.id === req.params.id);
+  // Needs the full record to diff for the audit trail, so it fetches that one row.
+  const existing = await db.getExpenseById(req.params.id);
   if (!existing) return res.status(404).json({ error: "Expense not found" });
   if (!assertSchoolAllowed(req, res, existing.school)) return;
   if (req.body.school && !assertSchoolAllowed(req, res, req.body.school)) return;
@@ -485,9 +474,9 @@ app.put("/api/expenses/:id", requireAuth, requireAdmin, h(async (req, res) => {
 }));
 
 app.delete("/api/expenses/:id", requireAuth, requireAdmin, h(async (req, res) => {
-  const all = await db.getExpenses();
-  const existing = all.find((e) => e.id === req.params.id);
-  if (existing && !assertSchoolAllowed(req, res, existing.school)) return;
+  // Same no-op-on-missing behavior as deleting a student, above.
+  const school = await db.getExpenseSchool(req.params.id);
+  if (school !== null && !assertSchoolAllowed(req, res, school)) return;
   await db.deleteExpense(req.params.id);
   res.json({ ok: true });
 }));

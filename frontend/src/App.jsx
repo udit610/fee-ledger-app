@@ -1,8 +1,27 @@
 import React, { useState, useEffect, useMemo, useRef, useLayoutEffect } from "react";
 import { createPortal } from "react-dom";
 import { Search, Plus, MessageCircle, X, Check, Clock, AlertTriangle, IndianRupee, Send, History, Trash2, Upload, Download, FileSpreadsheet, AlertCircle, Pencil, LogOut, ChevronDown, ChevronLeft, ChevronRight, BarChart3, DatabaseBackup, Sun, Moon, Bus, CalendarClock } from "lucide-react";
-import * as XLSX from "xlsx";
 import { api } from "./api.js";
+
+// xlsx is by far the heaviest dependency here (~400kB of JS), and it only matters
+// when someone actually imports or exports a spreadsheet — which most sessions
+// never do. Loading it on demand keeps it out of the initial bundle and out of the
+// service worker's precache, so the app starts fast on a phone. The promise is
+// cached, so the module is fetched and parsed at most once per session.
+let xlsxPromise = null;
+function loadXLSX() {
+  if (!xlsxPromise) xlsxPromise = import("xlsx");
+  return xlsxPromise;
+}
+
+// Shared tail of every "build a sheet and download it" path.
+async function downloadSheet(rows, sheetName, filename, { aoa = false } = {}) {
+  const XLSX = await loadXLSX();
+  const ws = aoa ? XLSX.utils.aoa_to_sheet(rows) : XLSX.utils.json_to_sheet(rows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, sheetName);
+  XLSX.writeFile(wb, filename);
+}
 
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID;
 const SCHOOLS = ["Vardhman Convent School", "Blossom Heights Pre-School"];
@@ -212,18 +231,27 @@ function instPaidAmount(inst) {
 // Used on Excel import, where we only know a lump "Paid" total, not which periods.
 // Any leftover that's less than a full installment is recorded as a partial
 // payment against the next period rather than being dropped.
-function markInstallmentsFromPaidTotal(installments, paidTotal) {
+// `previous`, when given, is the schedule being replaced: any period that
+// survives the rebuild under the same label keeps its real paid date and payer
+// instead of being restamped with today's. Excel import passes nothing and so
+// still falls back to "now", exactly as before.
+function markInstallmentsFromPaidTotal(installments, paidTotal, previous = []) {
+  const priorByPeriod = new Map((previous || []).map((i) => [i.period, i]));
+  const now = new Date().toISOString();
   let remaining = Number(paidTotal) || 0;
-  return installments.map((inst) => {
-    if (remaining <= 0 || !(inst.amount > 0)) return inst;
-    if (remaining >= inst.amount) {
-      remaining -= inst.amount;
-      return { ...inst, paid: true, paidDate: new Date().toISOString(), paidAmount: inst.amount };
-    }
-    const partial = remaining;
-    remaining = 0;
-    return { ...inst, paid: false, paidAmount: partial };
+  const out = installments.map((inst) => {
+    const amount = Number(inst.amount) || 0;
+    if (remaining <= 0.005 || amount <= 0) return inst;
+    const apply = Math.min(amount, remaining);
+    remaining -= apply;
+    const prior = priorByPeriod.get(inst.period);
+    const fullyPaid = apply >= amount - 0.005;
+    const next = { ...inst, paid: fullyPaid, paidAmount: apply };
+    if (fullyPaid) next.paidDate = (prior && prior.paidDate) || now;
+    if (prior && prior.paidBy) next.paidBy = prior.paidBy;
+    return next;
   });
+  return { installments: out, applied: (Number(paidTotal) || 0) - remaining, unapplied: Math.max(0, remaining) };
 }
 
 // Derives total/paid/due for installment-plan students from their installments array.
@@ -409,10 +437,7 @@ function exportLedger(students) {
       "Total Pending (All Fees)": computeTotalPending(s),
     };
   });
-  const ws = XLSX.utils.json_to_sheet(rows);
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, "Fee Ledger");
-  XLSX.writeFile(wb, `fee-ledger-export-${todayISO()}.xlsx`);
+  return downloadSheet(rows, "Fee Ledger", `fee-ledger-export-${todayISO()}.xlsx`);
 }
 
 function downloadTemplate() {
@@ -424,13 +449,13 @@ function downloadTemplate() {
     ["Myra Chopra", "Prep", "Blossom Heights Pre-School", "9876500033", "", 0, "2026-06-01", 4500, "", "", "", ""],
     ["Kabir Rao", "Grade 6", "Vardhman Convent School", "9876500055", "", 0, "2026-04-15", "", 9000, "", "Ramesh Rao", ""],
   ];
-  const ws = XLSX.utils.aoa_to_sheet(sample);
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, "Fee Ledger");
-  XLSX.writeFile(wb, "fee-ledger-template.xlsx");
+  return downloadSheet(sample, "Fee Ledger", "fee-ledger-template.xlsx", { aoa: true });
 }
 
-function excelDateToISO(value) {
+// Takes the lazily-loaded xlsx module as an argument rather than reaching for a
+// module-level import, so the date helper stays synchronous inside parseWorkbook's
+// row mapping.
+function excelDateToISO(value, XLSX) {
   if (value == null || value === "") return "";
   if (typeof value === "number") {
     const d = XLSX.SSF.parse_date_code(value);
@@ -446,7 +471,8 @@ function normalizeKey(k) {
   return String(k || "").trim().toLowerCase().replace(/[^a-z]/g, "");
 }
 
-function parseWorkbook(arrayBuffer) {
+async function parseWorkbook(arrayBuffer) {
+  const XLSX = await loadXLSX();
   const wb = XLSX.read(arrayBuffer, { type: "array" });
   const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: "" });
   return rows.map((row, i) => {
@@ -459,7 +485,7 @@ function parseWorkbook(arrayBuffer) {
     const fatherName = String(map["fathersname"] || map["fathername"] || map["guardianname"] || "").trim();
     const transportRate = Number(map["transportrate"] || map["transportfee"] || map["transportmonthly"] || 0);
     const paid = Number(map["paid"] || 0);
-    const due = excelDateToISO(map["duedate"] || map["due"]);
+    const due = excelDateToISO(map["duedate"] || map["due"], XLSX);
     const monthlyAmount = Number(map["monthlyamount"] || 0);
     const quarterlyAmount = Number(map["quarterlyamount"] || 0);
     const biannualAmount = Number(map["biannualamount"] || map["halfyearlyamount"] || map["semiannualamount"] || 0);
@@ -991,46 +1017,86 @@ function FeeLedger({ user, onLogout }) {
   // Names shared by more than one student — used to only show "Father: ..." on rows
   // where it's actually needed to tell two same-named kids apart, instead of on every row.
   const duplicateNames = useMemo(() => {
-    const counts = {};
-    students.forEach((s) => { counts[normName(s.name)] = (counts[normName(s.name)] || 0) + 1; });
-    return new Set(Object.keys(counts).filter((n) => counts[n] > 1));
+    const counts = new Map();
+    students.forEach((s) => {
+      const n = normName(s.name); // normName once per student, not twice
+      counts.set(n, (counts.get(n) || 0) + 1);
+    });
+    const dupes = new Set();
+    counts.forEach((count, name) => { if (count > 1) dupes.add(name); });
+    return dupes;
   }, [students]);
 
+  // Derive each student's computed totals and status exactly once per data change.
+  // `filtered` and `stats` both used to run their own full withComputed + statusOf
+  // + object-spread pass over every student, so this work was being done twice on
+  // every filter keystroke.
+  const decorated = useMemo(() => {
+    const today = todayISO(); // hoisted: was recomputed for every student
+    return students.map((raw) => {
+      const s = withComputed(raw);
+      return { ...s, status: statusOf(s, today), balance: s.total - s.paid, daysOverdue: -daysBetween(s.due, today) };
+    });
+  }, [students]);
+
+  // The school/class/plan subset both the stat cards and the visible list start
+  // from. Split out so changing only the search box or the status tab doesn't
+  // redo this, and so `stats` doesn't recompute when they change at all.
+  const scoped = useMemo(() => {
+    return decorated.filter(
+      (s) =>
+        (schoolFilter === "All Schools" || s.school === schoolFilter) &&
+        (classFilter === "All Classes" || s.cls === classFilter) &&
+        (planFilter === "all" || planSelectValue(s.planType, s.frequency) === planFilter)
+    );
+  }, [decorated, schoolFilter, classFilter, planFilter]);
+
   const filtered = useMemo(() => {
-    let list = students
-      .map((s) => withComputed(s))
-      .map((s) => ({ ...s, status: statusOf(s), balance: s.total - s.paid, daysOverdue: -daysBetween(s.due, todayISO()) }))
-      .filter((s) => (schoolFilter === "All Schools" ? true : s.school === schoolFilter))
-      .filter((s) => (classFilter === "All Classes" ? true : s.cls === classFilter))
-      .filter((s) => (planFilter === "all" ? true : planSelectValue(s.planType, s.frequency) === planFilter))
-      .filter((s) => (!transportOnly ? true : s.transportRate > 0))
-      .filter((s) => (statusFilter === "all" ? true : s.status === statusFilter))
-      .filter((s) => s.name.toLowerCase().includes(query.toLowerCase()));
+    // One predicate instead of a chain of .filter() calls, each of which built
+    // its own intermediate array, and one toLowerCase() for the query instead of
+    // one per student.
+    const q = query.toLowerCase();
+    const list = scoped.filter(
+      (s) =>
+        (!transportOnly || s.transportRate > 0) &&
+        (statusFilter === "all" || s.status === statusFilter) &&
+        (!q || s.name.toLowerCase().includes(q))
+    );
     if (sortBy === "name") list.sort((a, b) => a.name.localeCompare(b.name));
-    if (sortBy === "balance") list.sort((a, b) => b.balance - a.balance);
-    if (sortBy === "overdue") list.sort((a, b) => b.daysOverdue - a.daysOverdue);
+    else if (sortBy === "balance") list.sort((a, b) => b.balance - a.balance);
+    else if (sortBy === "overdue") list.sort((a, b) => b.daysOverdue - a.daysOverdue);
     return list;
-  }, [students, schoolFilter, classFilter, planFilter, transportOnly, statusFilter, query, sortBy]);
+  }, [scoped, transportOnly, statusFilter, query, sortBy]);
 
   const stats = useMemo(() => {
-    const pool = students.map((s) => withComputed(s)).map((s) => ({ ...s, status: statusOf(s) }))
-      .filter((s) => (schoolFilter === "All Schools" ? true : s.school === schoolFilter))
-      .filter((s) => (classFilter === "All Classes" ? true : s.cls === classFilter))
-      .filter((s) => (planFilter === "all" ? true : planSelectValue(s.planType, s.frequency) === planFilter));
-    return {
-      count: pool.length,
-      totalDue: pool.reduce((a, s) => a + (s.total - s.paid), 0),
-      collected: pool.reduce((a, s) => a + s.paid, 0),
-      totalFees: pool.reduce((a, s) => a + s.total, 0),
-      overdue: pool.filter((s) => s.status === "overdue").length,
-      overdueAmount: pool.filter((s) => s.status === "overdue").reduce((a, s) => a + computeTotalPending(s), 0),
-      transportDue: pool.reduce((a, s) => a + transportComputed(s).balance, 0),
-      transportCollected: pool.reduce((a, s) => a + transportComputed(s).paid, 0),
-      annualFeeDue: pool.reduce((a, s) => a + annualFeeComputed(s).balance, 0),
-      annualFeeCollected: pool.reduce((a, s) => a + annualFeeComputed(s).paid, 0),
-      previousSessionDue: pool.reduce((a, s) => a + (s.previousSessionDue || 0), 0),
+    // One pass accumulating every figure, rather than eleven separate
+    // reduce/filter passes over the same array.
+    const acc = {
+      count: scoped.length,
+      totalDue: 0, collected: 0, totalFees: 0,
+      overdue: 0, overdueAmount: 0,
+      transportDue: 0, transportCollected: 0,
+      annualFeeDue: 0, annualFeeCollected: 0,
+      previousSessionDue: 0,
     };
-  }, [students, schoolFilter, classFilter, planFilter]);
+    for (const s of scoped) {
+      acc.totalDue += s.total - s.paid;
+      acc.collected += s.paid;
+      acc.totalFees += s.total;
+      if (s.status === "overdue") {
+        acc.overdue += 1;
+        acc.overdueAmount += computeTotalPending(s);
+      }
+      const t = transportComputed(s);
+      acc.transportDue += t.balance;
+      acc.transportCollected += t.paid;
+      const af = annualFeeComputed(s);
+      acc.annualFeeDue += af.balance;
+      acc.annualFeeCollected += af.paid;
+      acc.previousSessionDue += s.previousSessionDue || 0;
+    }
+    return acc;
+  }, [scoped]);
 
   const scheduleStudent = scheduleStudentId ? withComputed(students.find((s) => s.id === scheduleStudentId) || null) : null;
   useEffect(() => {
@@ -1174,7 +1240,10 @@ function FeeLedger({ user, onLogout }) {
     // account-affecting actions (payments, edits), and reminder volume would
     // drown those out.
 
-    return entries.filter((en) => en.date).sort((a, b) => new Date(b.date) - new Date(a.date));
+    // Every `date` here is an ISO-8601 string, which sorts correctly as text — so
+    // compare the strings directly instead of allocating two Date objects per
+    // comparison (O(n log n) of them) just to sort newest-first.
+    return entries.filter((en) => en.date).sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
   }, [students, expenses, schoolFilter]);
 
   const activityStaffList = useMemo(() => {
@@ -1191,13 +1260,49 @@ function FeeLedger({ user, onLogout }) {
       activityRange === "year" ? new Date(now.getFullYear(), 0, 1) :
       null; // "all"
     const q = activityQuery.trim().toLowerCase();
+    // Compare epoch millis against one pre-computed boundary instead of parsing
+    // each entry's date into a Date object on every keystroke.
+    const rangeStartMs = rangeStart ? rangeStart.getTime() : null;
+    const staffFiltered = activityStaffFilter !== "All Staff";
     return activityLog.filter((en) => {
-      if (rangeStart && new Date(en.date) < rangeStart) return false;
-      if (activityStaffFilter !== "All Staff" && en.by !== activityStaffFilter) return false;
+      if (rangeStartMs !== null && Date.parse(en.date) < rangeStartMs) return false;
+      if (staffFiltered && en.by !== activityStaffFilter) return false;
       if (q && !(`${en.who} ${en.detail} ${en.type}`.toLowerCase().includes(q))) return false;
       return true;
     });
   }, [activityLog, activityRange, activityStaffFilter, activityQuery]);
+
+  // These three counters used to run three full scans of the activity log on
+  // every single render of the History tab — including every keystroke in its
+  // search box, which doesn't affect them at all.
+  const activityCounts = useMemo(() => {
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const endOfToday = startOfToday + 86400000;
+    const thisMonth = monthKey(todayISO());
+    const thisYear = now.getFullYear();
+    let today = 0, month = 0, year = 0;
+    for (const en of activityLog) {
+      const ms = Date.parse(en.date);
+      // Same local-calendar semantics as before, but one pass and one Date
+      // allocation per entry instead of three scans allocating several each.
+      if (ms >= startOfToday && ms < endOfToday) today++;
+      if (monthKey(en.date) === thisMonth) month++;
+      if (new Date(ms).getFullYear() === thisYear) year++;
+    }
+    return { today, month, year };
+  }, [activityLog]);
+
+  // The spreadsheet code is fetched on demand now, so an export can fail in a way
+  // it previously couldn't — tapping Export while offline, say. Wrap the handlers
+  // so that surfaces as a toast rather than an unhandled rejection and a button
+  // that appears to do nothing.
+  function runExport(fn) {
+    return () =>
+      Promise.resolve()
+        .then(fn)
+        .catch(() => setToast({ kind: "warn", text: "Couldn't build the spreadsheet — check your connection and try again." }));
+  }
 
   function exportActivityLog(list) {
     const rows = list.map((en) => {
@@ -1209,10 +1314,7 @@ function FeeLedger({ user, onLogout }) {
         Detail: en.detail, Amount: en.amount ?? "", "Done By": en.by,
       };
     });
-    const ws = XLSX.utils.json_to_sheet(rows);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "History");
-    XLSX.writeFile(wb, `activity-history-${activityRange}-${todayISO()}.xlsx`);
+    return downloadSheet(rows, "History", `activity-history-${activityRange}-${todayISO()}.xlsx`);
   }
 
   const monthlySeries = useMemo(() => {
@@ -1221,17 +1323,19 @@ function FeeLedger({ user, onLogout }) {
   }, [students, schoolFilter]);
 
   const classBreakdown = useMemo(() => {
-    const pool = students.map((s) => withComputed(s)).filter((s) => (schoolFilter === "All Schools" ? true : s.school === schoolFilter));
-    const groups = {};
-    pool.forEach((s) => {
+    // Reuses `decorated` rather than running withComputed over every student again.
+    const groups = new Map();
+    for (const s of decorated) {
+      if (schoolFilter !== "All Schools" && s.school !== schoolFilter) continue;
       const key = schoolFilter === "All Schools" ? `${s.school} · ${s.cls}` : s.cls;
-      if (!groups[key]) groups[key] = { key, count: 0, total: 0, collected: 0 };
-      groups[key].count += 1;
-      groups[key].total += s.total;
-      groups[key].collected += s.paid;
-    });
-    return Object.values(groups).sort((a, b) => a.key.localeCompare(b.key));
-  }, [students, schoolFilter]);
+      let g = groups.get(key);
+      if (!g) groups.set(key, (g = { key, count: 0, total: 0, collected: 0 }));
+      g.count += 1;
+      g.total += s.total;
+      g.collected += s.paid;
+    }
+    return Array.from(groups.values()).sort((a, b) => a.key.localeCompare(b.key));
+  }, [decorated, schoolFilter]);
 
   function toggleSelect(id) {
     setSelected((prev) => {
@@ -1365,14 +1469,20 @@ function FeeLedger({ user, onLogout }) {
   async function regenerateSchedule(studentId) {
     const s = students.find((x) => x.id === studentId);
     if (!s) return;
-    if (!window.confirm("This rebuilds the payment schedule from scratch and clears all paid marks. Continue?")) return;
+    if (!window.confirm("This rebuilds the payment schedule from scratch. Payments already recorded are kept and re-applied to the new schedule. Continue?")) return;
     try {
       // Server rebuilds the schedule itself (row-locked, same pattern as
       // markInstallmentPaid) rather than us computing it here and PUTing the
       // whole array back — keeps this safe even if acted on from two tabs at once.
       const updated = await api.regenerateSchedule(studentId);
       setStudents((prev) => prev.map((x) => (x.id === studentId ? updated : x)));
-      setToast({ kind: "ok", text: "Schedule regenerated." });
+      // A shorter schedule can leave paid money with nowhere to sit — say so
+      // rather than letting it disappear off the balance without comment.
+      setToast(
+        updated.unapplied > 0.005
+          ? { kind: "warn", text: `Schedule regenerated. ${money(updated.unapplied)} already paid doesn't fit the new schedule — ${s.name} is in credit by that much.` }
+          : { kind: "ok", text: "Schedule regenerated." }
+      );
     } catch (err) {
       setToast({ kind: "warn", text: err.message });
     }
@@ -1436,12 +1546,22 @@ function FeeLedger({ user, onLogout }) {
         (original.joinMonth || null) !== newJoinMonth;
 
       if (planChanged) {
-        if (!window.confirm("Changing the plan type, amount, start date, or joining month rebuilds the payment schedule and clears any paid marks. Continue?")) {
+        if (!window.confirm("Changing the plan type, amount, start date, or joining month rebuilds the payment schedule. Payments already recorded are kept and re-applied to the new schedule. Continue?")) {
           return;
         }
-        const installments = generateInstallments(plan.planType, plan.frequency, newStudent.due, newStudent.installmentAmount, newJoinMonth);
-        const total = installments.reduce((a, i) => a + Number(i.amount || 0), 0);
-        payload = { ...base, planType: plan.planType, frequency: plan.frequency, installmentAmount: newAmount, due: newStudent.due, total, paid: 0, installments, payments: [], joinMonth: newJoinMonth };
+        const fresh = generateInstallments(plan.planType, plan.frequency, newStudent.due, newStudent.installmentAmount, newJoinMonth);
+        const total = fresh.reduce((a, i) => a + Number(i.amount || 0), 0);
+        // Rebuild the schedule, not the payment record: carry the paid total over
+        // onto the new periods and leave `payments` out of the payload entirely so
+        // the server keeps the existing log. This used to send paid: 0 and
+        // payments: [], so fixing a student's joining month wiped every rupee
+        // they'd actually paid.
+        const paidSoFar = (original?.installments || []).reduce((a, i) => a + instPaidAmount(i), 0);
+        const { installments, applied, unapplied } = markInstallmentsFromPaidTotal(fresh, paidSoFar, original?.installments || []);
+        if (unapplied > 0.005) {
+          setToast({ kind: "warn", text: `${money(unapplied)} already paid doesn't fit the new schedule — ${newStudent.name || "this student"} is in credit by that much.` });
+        }
+        payload = { ...base, planType: plan.planType, frequency: plan.frequency, installmentAmount: newAmount, due: newStudent.due, total, paid: applied, installments, joinMonth: newJoinMonth };
       } else {
         payload = { ...base, planType: plan.planType, frequency: plan.frequency, installmentAmount: newAmount };
       }
@@ -1594,10 +1714,7 @@ function FeeLedger({ user, onLogout }) {
     const rows = list.map((e) => ({
       School: e.school, Category: e.category, Description: e.description, Vendor: e.vendor, Amount: e.amount, Date: e.date,
     }));
-    const ws = XLSX.utils.json_to_sheet(rows);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Expenses");
-    XLSX.writeFile(wb, `expenses-export-${todayISO()}.xlsx`);
+    return downloadSheet(rows, "Expenses", `expenses-export-${todayISO()}.xlsx`);
   }
 
   function handleFileSelect(e) {
@@ -1605,10 +1722,10 @@ function FeeLedger({ user, onLogout }) {
     if (!file) return;
     setImportFileName(file.name);
     const reader = new FileReader();
-    reader.onload = (evt) => {
+    reader.onload = async (evt) => {
       try {
-        const rows = parseWorkbook(evt.target.result).map((r) => ({ ...r, duplicate: !!findDuplicate(r, students) }));
-        setImportRows(rows);
+        const parsed = await parseWorkbook(evt.target.result);
+        setImportRows(parsed.map((r) => ({ ...r, duplicate: !!findDuplicate(r, students) })));
       } catch {
         setToast({ kind: "warn", text: "Couldn't read that file." });
       }
@@ -1622,12 +1739,14 @@ function FeeLedger({ user, onLogout }) {
       .filter((r) => !(skipDuplicates && r.duplicate))
       .map(({ errors, rowNum, id, duplicate, ...s }) => {
         if (s.planType === "full") return s;
-        const installments = markInstallmentsFromPaidTotal(
+        // `applied` counts partial periods too; the old sum-of-fully-paid here
+        // silently dropped a part-paid month from the stored total (the UI already
+        // derived it including partials, so the two disagreed).
+        const { installments, applied } = markInstallmentsFromPaidTotal(
           generateInstallments(s.planType, s.frequency, s.due, s.installmentAmount),
           s.paid
         );
-        const paid = installments.filter((i) => i.paid).reduce((a, i) => a + Number(i.amount || 0), 0);
-        return { ...s, installments, paid };
+        return { ...s, installments, paid: applied };
       });
     if (valid.length === 0) return setToast({ kind: "warn", text: "No valid rows to import." });
     try {
@@ -1643,7 +1762,9 @@ function FeeLedger({ user, onLogout }) {
     }
   }
 
-  const unpaidSelectable = filtered.filter((s) => s.status !== "paid");
+  // Memoized: this drives the "select all" checkbox state and was re-scanning the
+  // whole filtered list on every render, including renders that never touch it.
+  const unpaidSelectable = useMemo(() => filtered.filter((s) => s.status !== "paid"), [filtered]);
 
   async function downloadBackup() {
     try {
@@ -2045,9 +2166,9 @@ function FeeLedger({ user, onLogout }) {
           )
         ) : (
           <div className="stats-row">
-            <div className="stat-card"><div className="stat-label">Actions today</div><div className="stat-value">{activityLog.filter((en) => new Date(en.date).toDateString() === new Date().toDateString()).length}</div></div>
-            <div className="stat-card"><div className="stat-label">Actions this month</div><div className="stat-value">{activityLog.filter((en) => monthKey(en.date) === monthKey(todayISO())).length}</div></div>
-            <div className="stat-card"><div className="stat-label">Actions this year</div><div className="stat-value">{activityLog.filter((en) => new Date(en.date).getFullYear() === new Date().getFullYear()).length}</div></div>
+            <div className="stat-card"><div className="stat-label">Actions today</div><div className="stat-value">{activityCounts.today}</div></div>
+            <div className="stat-card"><div className="stat-label">Actions this month</div><div className="stat-value">{activityCounts.month}</div></div>
+            <div className="stat-card"><div className="stat-label">Actions this year</div><div className="stat-value">{activityCounts.year}</div></div>
             <div className="stat-card"><div className="stat-label">Staff involved</div><div className="stat-value">{activityStaffList.length - 1}</div></div>
           </div>
         )}
@@ -2125,7 +2246,7 @@ function FeeLedger({ user, onLogout }) {
               )}
               {!isCollector && (
                 <>
-                  <button className="btn btn-ghost" onClick={() => exportLedger(students)}><Download size={15} /> Export</button>
+                  <button className="btn btn-ghost" onClick={runExport(() => exportLedger(students))}><Download size={15} /> Export</button>
                   <button className="btn btn-ghost" onClick={() => setShowReports(true)}><BarChart3 size={15} /> Reports</button>
                   <button className="btn btn-ghost" onClick={() => setShowHistory(true)}><History size={15} /> History</button>
                   <button className="btn btn-ghost" onClick={() => setShowBackup(true)}><DatabaseBackup size={15} /> Backup</button>
@@ -2272,7 +2393,7 @@ function FeeLedger({ user, onLogout }) {
                   { value: "category", label: "Sort: Category" },
                 ]}
               />
-              {!isCollector && <button className="btn btn-ghost" onClick={() => exportExpenses(filteredExpenses)}><Download size={15} /> Export</button>}
+              {!isCollector && <button className="btn btn-ghost" onClick={runExport(() => exportExpenses(filteredExpenses))}><Download size={15} /> Export</button>}
               <button className="btn btn-primary" onClick={() => setShowAddExpense(true)}><Plus size={15} /> Add Expense</button>
             </div>
           </div>
@@ -2355,7 +2476,7 @@ function FeeLedger({ user, onLogout }) {
                   options={activityStaffList.map((s) => ({ value: s, label: s === "All Staff" ? "All staff" : s }))}
                 />
               )}
-              <button className="btn btn-ghost" onClick={() => exportActivityLog(filteredActivity)}><Download size={15} /> Export</button>
+              <button className="btn btn-ghost" onClick={runExport(() => exportActivityLog(filteredActivity))}><Download size={15} /> Export</button>
             </div>
           </div>
 
@@ -2520,7 +2641,7 @@ function FeeLedger({ user, onLogout }) {
                 <p style={{ fontSize: 13, color: "var(--text-soft)", marginBottom: 12 }}>
                   Columns: <strong>Name, Class, School, Parent Phone, Total Fee, Paid, Due Date</strong>, plus <strong>Quarterly Amount</strong>, <strong>Biannual Amount</strong>, or <strong>Monthly Amount</strong> for an installment plan (leave Total Fee blank if using one of these — it's calculated automatically). <strong>Father's Name</strong> and <strong>Transport Rate</strong> are optional.
                 </p>
-                <button className="btn btn-ghost" style={{ width: "100%", justifyContent: "center", marginBottom: 10 }} onClick={downloadTemplate}><Download size={15} /> Download template</button>
+                <button className="btn btn-ghost" style={{ width: "100%", justifyContent: "center", marginBottom: 10 }} onClick={runExport(downloadTemplate)}><Download size={15} /> Download template</button>
                 <label className="btn btn-primary" style={{ width: "100%", justifyContent: "center", cursor: "pointer" }}>
                   <Upload size={15} /> Choose file
                   <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: "none" }} onChange={handleFileSelect} />
