@@ -385,7 +385,9 @@ app.post("/api/students/:id/regenerate-schedule", requireAuth, requireAdmin, h(a
   const result = await db.regenerateSchedule(req.params.id);
   if (result.error === "not_found") return res.status(404).json({ error: "Student not found" });
   if (result.error === "not_installment_plan") return res.status(400).json({ error: "This student isn't on an installment plan" });
-  res.json(result.student);
+  // unapplied: paid money the rebuilt (smaller) schedule had no room for, so the
+  // UI can say so rather than letting it quietly vanish off the balance.
+  res.json({ ...result.student, unapplied: result.unapplied || 0 });
 }));
 
 app.delete("/api/students/:id", requireAuth, requireAdmin, h(async (req, res) => {

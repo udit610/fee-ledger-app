@@ -301,6 +301,32 @@ function filterMonthsFromJoin(months, joinMonth) {
   return months.filter((m) => academicPosition(m) >= startPos);
 }
 
+// Spreads an already-known paid total across a freshly built schedule, in order,
+// so rebuilding a schedule doesn't throw away money the school has actually
+// received. Where a period survives the rebuild under the same label, its real
+// paid date and payer carry over; otherwise `fallbackDate` is used (matching
+// markInstallmentsFromPaidTotal in App.jsx, which the Excel import relies on).
+// Returns what it managed to place and what wouldn't fit — a schedule that
+// shrinks can leave the student genuinely in credit, which is a human decision,
+// not something to silently discard.
+function applyPaidTotal(installments, paidTotal, previous = [], fallbackDate = null) {
+  const priorByPeriod = new Map((previous || []).map((i) => [i.period, i]));
+  let remaining = Number(paidTotal) || 0;
+  const out = installments.map((inst) => {
+    const amount = Number(inst.amount) || 0;
+    if (remaining <= 0.005 || amount <= 0) return inst;
+    const apply = Math.min(amount, remaining);
+    remaining -= apply;
+    const prior = priorByPeriod.get(inst.period);
+    const fullyPaid = apply >= amount - 0.005;
+    const next = { ...inst, paid: fullyPaid, paidAmount: apply };
+    if (fullyPaid) next.paidDate = (prior && prior.paidDate) || fallbackDate;
+    if (prior && prior.paidBy) next.paidBy = prior.paidBy;
+    return next;
+  });
+  return { installments: out, applied: (Number(paidTotal) || 0) - remaining, unapplied: Math.max(0, remaining) };
+}
+
 function generateInstallments(frequency, startDue, amount, joinMonth) {
   const cfg = FREQ_CONFIG[frequency] || FREQ_CONFIG.monthly;
   const allMonths = ACADEMIC_MONTHS[frequency];
@@ -750,6 +776,15 @@ export const db = {
   // frontend used to compute the new installments array itself and PUT the
   // whole thing back — same lost-update risk as markInstallmentPaid had, just
   // rarer in practice since it's gated behind an explicit confirm dialog.
+  //
+  // Rebuilding the SCHEDULE no longer wipes the PAYMENTS. It used to reset
+  // paid = 0 and payments = '[]', which meant correcting a student's joining
+  // month — the routine reason to rebuild — destroyed the record of every rupee
+  // they had actually handed over, with only a confirm dialog in the way. The
+  // payments log is an audit trail of real money received; the schedule is just
+  // how that money is expected to arrive. Only the latter is derived, so only
+  // the latter is rebuilt: the log is kept intact and the paid total is spread
+  // back across the new periods in order.
   async regenerateSchedule(id) {
     await ready;
     const client = await pool.connect();
@@ -766,14 +801,20 @@ export const db = {
         return { error: "not_installment_plan" };
       }
       const startDue = s.due || (s.installments && s.installments[0] && s.installments[0].due);
-      const installments = generateInstallments(s.frequency, startDue, s.installmentAmount, s.joinMonth);
-      const total = installments.reduce((a, i) => a + Number(i.amount || 0), 0);
+      const fresh = generateInstallments(s.frequency, startDue, s.installmentAmount, s.joinMonth);
+      const total = fresh.reduce((a, i) => a + Number(i.amount || 0), 0);
+      // What's already been paid, taken from the old schedule rather than the
+      // paid column, so a partially-paid period is carried over at its real value.
+      const paidSoFar = (s.installments || []).reduce((a, i) => a + instPaidAmount(i), 0);
+      const { installments, applied, unapplied } = applyPaidTotal(fresh, paidSoFar, s.installments || []);
       const { rows: updated } = await client.query(
-        "UPDATE students SET installments = $1, total = $2, paid = 0, payments = '[]' WHERE id = $3 RETURNING *",
-        [JSON.stringify(installments), total, id]
+        "UPDATE students SET installments = $1, total = $2, paid = $3 WHERE id = $4 RETURNING *",
+        [JSON.stringify(installments), total, applied, id]
       );
       await client.query("COMMIT");
-      return { student: toStudent(updated[0]) };
+      // unapplied > 0 means the new schedule is smaller than what they've paid —
+      // the student is in credit and someone needs to decide what to do about it.
+      return { student: toStudent(updated[0]), unapplied };
     } catch (err) {
       await safeRollback(client);
       throw err;

@@ -231,18 +231,27 @@ function instPaidAmount(inst) {
 // Used on Excel import, where we only know a lump "Paid" total, not which periods.
 // Any leftover that's less than a full installment is recorded as a partial
 // payment against the next period rather than being dropped.
-function markInstallmentsFromPaidTotal(installments, paidTotal) {
+// `previous`, when given, is the schedule being replaced: any period that
+// survives the rebuild under the same label keeps its real paid date and payer
+// instead of being restamped with today's. Excel import passes nothing and so
+// still falls back to "now", exactly as before.
+function markInstallmentsFromPaidTotal(installments, paidTotal, previous = []) {
+  const priorByPeriod = new Map((previous || []).map((i) => [i.period, i]));
+  const now = new Date().toISOString();
   let remaining = Number(paidTotal) || 0;
-  return installments.map((inst) => {
-    if (remaining <= 0 || !(inst.amount > 0)) return inst;
-    if (remaining >= inst.amount) {
-      remaining -= inst.amount;
-      return { ...inst, paid: true, paidDate: new Date().toISOString(), paidAmount: inst.amount };
-    }
-    const partial = remaining;
-    remaining = 0;
-    return { ...inst, paid: false, paidAmount: partial };
+  const out = installments.map((inst) => {
+    const amount = Number(inst.amount) || 0;
+    if (remaining <= 0.005 || amount <= 0) return inst;
+    const apply = Math.min(amount, remaining);
+    remaining -= apply;
+    const prior = priorByPeriod.get(inst.period);
+    const fullyPaid = apply >= amount - 0.005;
+    const next = { ...inst, paid: fullyPaid, paidAmount: apply };
+    if (fullyPaid) next.paidDate = (prior && prior.paidDate) || now;
+    if (prior && prior.paidBy) next.paidBy = prior.paidBy;
+    return next;
   });
+  return { installments: out, applied: (Number(paidTotal) || 0) - remaining, unapplied: Math.max(0, remaining) };
 }
 
 // Derives total/paid/due for installment-plan students from their installments array.
@@ -1460,14 +1469,20 @@ function FeeLedger({ user, onLogout }) {
   async function regenerateSchedule(studentId) {
     const s = students.find((x) => x.id === studentId);
     if (!s) return;
-    if (!window.confirm("This rebuilds the payment schedule from scratch and clears all paid marks. Continue?")) return;
+    if (!window.confirm("This rebuilds the payment schedule from scratch. Payments already recorded are kept and re-applied to the new schedule. Continue?")) return;
     try {
       // Server rebuilds the schedule itself (row-locked, same pattern as
       // markInstallmentPaid) rather than us computing it here and PUTing the
       // whole array back — keeps this safe even if acted on from two tabs at once.
       const updated = await api.regenerateSchedule(studentId);
       setStudents((prev) => prev.map((x) => (x.id === studentId ? updated : x)));
-      setToast({ kind: "ok", text: "Schedule regenerated." });
+      // A shorter schedule can leave paid money with nowhere to sit — say so
+      // rather than letting it disappear off the balance without comment.
+      setToast(
+        updated.unapplied > 0.005
+          ? { kind: "warn", text: `Schedule regenerated. ${money(updated.unapplied)} already paid doesn't fit the new schedule — ${s.name} is in credit by that much.` }
+          : { kind: "ok", text: "Schedule regenerated." }
+      );
     } catch (err) {
       setToast({ kind: "warn", text: err.message });
     }
@@ -1531,12 +1546,22 @@ function FeeLedger({ user, onLogout }) {
         (original.joinMonth || null) !== newJoinMonth;
 
       if (planChanged) {
-        if (!window.confirm("Changing the plan type, amount, start date, or joining month rebuilds the payment schedule and clears any paid marks. Continue?")) {
+        if (!window.confirm("Changing the plan type, amount, start date, or joining month rebuilds the payment schedule. Payments already recorded are kept and re-applied to the new schedule. Continue?")) {
           return;
         }
-        const installments = generateInstallments(plan.planType, plan.frequency, newStudent.due, newStudent.installmentAmount, newJoinMonth);
-        const total = installments.reduce((a, i) => a + Number(i.amount || 0), 0);
-        payload = { ...base, planType: plan.planType, frequency: plan.frequency, installmentAmount: newAmount, due: newStudent.due, total, paid: 0, installments, payments: [], joinMonth: newJoinMonth };
+        const fresh = generateInstallments(plan.planType, plan.frequency, newStudent.due, newStudent.installmentAmount, newJoinMonth);
+        const total = fresh.reduce((a, i) => a + Number(i.amount || 0), 0);
+        // Rebuild the schedule, not the payment record: carry the paid total over
+        // onto the new periods and leave `payments` out of the payload entirely so
+        // the server keeps the existing log. This used to send paid: 0 and
+        // payments: [], so fixing a student's joining month wiped every rupee
+        // they'd actually paid.
+        const paidSoFar = (original?.installments || []).reduce((a, i) => a + instPaidAmount(i), 0);
+        const { installments, applied, unapplied } = markInstallmentsFromPaidTotal(fresh, paidSoFar, original?.installments || []);
+        if (unapplied > 0.005) {
+          setToast({ kind: "warn", text: `${money(unapplied)} already paid doesn't fit the new schedule — ${newStudent.name || "this student"} is in credit by that much.` });
+        }
+        payload = { ...base, planType: plan.planType, frequency: plan.frequency, installmentAmount: newAmount, due: newStudent.due, total, paid: applied, installments, joinMonth: newJoinMonth };
       } else {
         payload = { ...base, planType: plan.planType, frequency: plan.frequency, installmentAmount: newAmount };
       }
@@ -1714,12 +1739,14 @@ function FeeLedger({ user, onLogout }) {
       .filter((r) => !(skipDuplicates && r.duplicate))
       .map(({ errors, rowNum, id, duplicate, ...s }) => {
         if (s.planType === "full") return s;
-        const installments = markInstallmentsFromPaidTotal(
+        // `applied` counts partial periods too; the old sum-of-fully-paid here
+        // silently dropped a part-paid month from the stored total (the UI already
+        // derived it including partials, so the two disagreed).
+        const { installments, applied } = markInstallmentsFromPaidTotal(
           generateInstallments(s.planType, s.frequency, s.due, s.installmentAmount),
           s.paid
         );
-        const paid = installments.filter((i) => i.paid).reduce((a, i) => a + Number(i.amount || 0), 0);
-        return { ...s, installments, paid };
+        return { ...s, installments, paid: applied };
       });
     if (valid.length === 0) return setToast({ kind: "warn", text: "No valid rows to import." });
     try {
