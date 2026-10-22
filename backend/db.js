@@ -18,6 +18,13 @@ export const pool = new Pool({
   // Neon (and most hosted Postgres free tiers) require SSL but use a cert
   // chain Node doesn't automatically trust — this is the standard workaround.
   ssl: DATABASE_URL.includes("localhost") ? false : { rejectUnauthorized: false },
+  // Neon free tiers cap concurrent connections, and this app is a single
+  // Render instance serving a few staff at a time — a small pool is plenty
+  // and stops one deploy (or a burst of page loads) from exhausting the
+  // database's connection budget and failing later requests.
+  max: 5,
+  idleTimeoutMillis: 30_000,
+  connectionTimeoutMillis: 5_000,
   // Safety valves against a hung request holding a row lock (from the FOR UPDATE
   // transactions below) forever. If a query somehow stalls (network blip, a bug),
   // Postgres kills it after 10s instead of leaving other edits to that same
@@ -63,28 +70,35 @@ async function init() {
   // Existing databases created before this column existed won't get it from
   // CREATE TABLE IF NOT EXISTS above (that only runs against a table that
   // doesn't exist yet) — add it explicitly, idempotently, for those.
-  await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS father_name TEXT DEFAULT '';`);
-  await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS transport_rate NUMERIC DEFAULT 0;`);
-  await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS transport_months JSONB DEFAULT '[]'::jsonb;`);
-  await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS transport_paid NUMERIC NOT NULL DEFAULT 0;`);
-  await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS transport_payments JSONB DEFAULT '[]'::jsonb;`);
-  await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS previous_session_due NUMERIC NOT NULL DEFAULT 0;`);
-  await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS previous_session_payments JSONB DEFAULT '[]'::jsonb;`);
-  await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS annual_fee_amount NUMERIC DEFAULT 0;`);
-  await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS annual_fee_paid NUMERIC NOT NULL DEFAULT 0;`);
-  await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS annual_fee_payments JSONB DEFAULT '[]'::jsonb;`);
-  // NULL means "no restriction" — the student's monthly/quarterly schedule runs
-  // the full academic year (April start), exactly as it always has. Only set
-  // when a student joins mid-year and should be billed starting from that month.
-  await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS join_month INTEGER;`);
+  // Sent as one multi-statement query instead of one round trip per column:
+  // init runs on every cold start, and each round trip to Neon costs real
+  // latency. Statements run in order, so the backfill still runs after its
+  // column exists. The single $1 placeholder is the backfill year.
+  // NULL means "no restriction" for join_month — the student's monthly/quarterly
+  // schedule runs the full academic year (April start), exactly as it always
+  // has. Only set when a student joins mid-year and should be billed starting
+  // from that month.
   // session_year needs special care: on a brand-new table it's fine to leave it
   // NULL (addStudent always sets it going forward). But on an EXISTING database,
   // adding this column with no value would make every existing student look like
   // they're behind on their session the moment this ships, rolling everyone's
   // real balances into "previous session due" on the next request. Backfilling
   // it to the CURRENT academic year for anyone who doesn't have one yet avoids that.
-  await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS session_year INTEGER;`);
-  await pool.query(`UPDATE students SET session_year = $1 WHERE session_year IS NULL;`, [currentAcademicYearStart()]);
+  await pool.query(`
+    ALTER TABLE students ADD COLUMN IF NOT EXISTS father_name TEXT DEFAULT '';
+    ALTER TABLE students ADD COLUMN IF NOT EXISTS transport_rate NUMERIC DEFAULT 0;
+    ALTER TABLE students ADD COLUMN IF NOT EXISTS transport_months JSONB DEFAULT '[]'::jsonb;
+    ALTER TABLE students ADD COLUMN IF NOT EXISTS transport_paid NUMERIC NOT NULL DEFAULT 0;
+    ALTER TABLE students ADD COLUMN IF NOT EXISTS transport_payments JSONB DEFAULT '[]'::jsonb;
+    ALTER TABLE students ADD COLUMN IF NOT EXISTS previous_session_due NUMERIC NOT NULL DEFAULT 0;
+    ALTER TABLE students ADD COLUMN IF NOT EXISTS previous_session_payments JSONB DEFAULT '[]'::jsonb;
+    ALTER TABLE students ADD COLUMN IF NOT EXISTS annual_fee_amount NUMERIC DEFAULT 0;
+    ALTER TABLE students ADD COLUMN IF NOT EXISTS annual_fee_paid NUMERIC NOT NULL DEFAULT 0;
+    ALTER TABLE students ADD COLUMN IF NOT EXISTS annual_fee_payments JSONB DEFAULT '[]'::jsonb;
+    ALTER TABLE students ADD COLUMN IF NOT EXISTS join_month INTEGER;
+    ALTER TABLE students ADD COLUMN IF NOT EXISTS session_year INTEGER;
+    UPDATE students SET session_year = $1 WHERE session_year IS NULL;
+  `, [currentAcademicYearStart()]);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS reminders (
       id TEXT PRIMARY KEY,
@@ -135,14 +149,25 @@ async function init() {
   //   session_year   — ensureSessionRollover probes this on every page load.
   //   backups        — both the daily-snapshot probe and the 60-snapshot prune
   //                    order/filter by taken_at.
-  await pool.query(`CREATE INDEX IF NOT EXISTS students_seq_idx ON students (seq DESC);`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS students_school_idx ON students (school);`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS students_session_year_idx ON students (session_year);`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS reminders_seq_idx ON reminders (seq DESC);`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS reminders_school_idx ON reminders (school);`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS expenses_seq_idx ON expenses (seq DESC);`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS expenses_school_idx ON expenses (school);`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS backups_taken_at_idx ON backups (taken_at DESC);`);
+  // One multi-statement query instead of one round trip per index.
+  // The *_school_seq_idx composites are new: a school-scoped list query is
+  // WHERE school = ANY(...) ORDER BY seq DESC, which the separate single-column
+  // indexes could only serve with a filter plus a sort. The composite serves
+  // the filter and the ordering together; the plain seq indexes stay for the
+  // unscoped (all-schools) lists.
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS students_seq_idx ON students (seq DESC);
+    CREATE INDEX IF NOT EXISTS students_school_idx ON students (school);
+    CREATE INDEX IF NOT EXISTS students_school_seq_idx ON students (school, seq DESC);
+    CREATE INDEX IF NOT EXISTS students_session_year_idx ON students (session_year);
+    CREATE INDEX IF NOT EXISTS reminders_seq_idx ON reminders (seq DESC);
+    CREATE INDEX IF NOT EXISTS reminders_school_idx ON reminders (school);
+    CREATE INDEX IF NOT EXISTS reminders_school_seq_idx ON reminders (school, seq DESC);
+    CREATE INDEX IF NOT EXISTS expenses_seq_idx ON expenses (seq DESC);
+    CREATE INDEX IF NOT EXISTS expenses_school_idx ON expenses (school);
+    CREATE INDEX IF NOT EXISTS expenses_school_seq_idx ON expenses (school, seq DESC);
+    CREATE INDEX IF NOT EXISTS backups_taken_at_idx ON backups (taken_at DESC);
+  `);
 }
 
 // Every exported function awaits this first, so the very first request after a
@@ -431,6 +456,16 @@ async function insertMany(client, table, columns, rows, valuesOf, { returning = 
   }
   return out;
 }
+
+// In-process memo for the two opportunistic checks that run on every
+// GET /api/students. Both used to hit the database on every page load even
+// though their answers can only change once a day (daily snapshot) or once
+// an academic year (rollover). This is a single Render instance serving a
+// few staff, so a process-local flag is enough — and importAll() clears the
+// rollover flag, because a restore can reintroduce students from an older
+// session that still need rolling over.
+let dailySnapshotCheckedDate = null;
+let rolloverCheckedYear = null;
 
 export const db = {
   // `schools` (optional) scopes the result to a staff account's allowed schools.
@@ -931,6 +966,12 @@ export const db = {
   // snapshot per calendar day without needing a separate cron service.
   async ensureDailySnapshot() {
     await ready;
+    // Skip the probe entirely once today's snapshot is known to exist: this
+    // runs on every page load, and after the first check of the day the answer
+    // cannot change until tomorrow. The date is server-local (UTC on Render);
+    // at worst a timezone edge re-probes once, it never skips a snapshot.
+    const today = new Date().toISOString().slice(0, 10);
+    if (dailySnapshotCheckedDate === today) return;
     // Written as a range test rather than `taken_at::date = now()::date` so it
     // can actually use backups_taken_at_idx — applying a cast to the column
     // makes the predicate unindexable and forces a scan of the whole table on
@@ -939,6 +980,7 @@ export const db = {
       "SELECT 1 FROM backups WHERE reason = 'daily' AND taken_at >= date_trunc('day', now()) LIMIT 1"
     );
     if (rows.length === 0) await db.snapshot("daily");
+    dailySnapshotCheckedDate = today;
   },
 
   // Called opportunistically on normal page-load traffic, same pattern as
@@ -954,8 +996,17 @@ export const db = {
   async ensureSessionRollover() {
     await ready;
     const year = currentAcademicYearStart();
+    // Same idea as the daily snapshot above: once this academic year has been
+    // checked and every student is on it, re-probing on every page load buys
+    // nothing. New students are always created on the current year, and a
+    // restore clears this flag in importAll(), so an older session coming back
+    // via backup is still caught on the next load.
+    if (rolloverCheckedYear === year) return;
     const { rows } = await pool.query("SELECT id FROM students WHERE session_year < $1", [year]);
-    if (rows.length === 0) return;
+    if (rows.length === 0) {
+      rolloverCheckedYear = year;
+      return;
+    }
     // One pooled connection for the whole batch instead of acquiring and releasing
     // one per student. Each student still gets its own BEGIN/COMMIT, so the row
     // locks stay as short-lived and independent as before — a slow student can't
@@ -992,6 +1043,9 @@ export const db = {
         );
         await client.query("COMMIT");
       }
+      // Every candidate row has now been rolled over (or was already current),
+      // so the next page load in this academic year can skip the probe.
+      rolloverCheckedYear = year;
     } catch (err) {
       await safeRollback(client);
       throw err;
@@ -1016,6 +1070,10 @@ export const db = {
 
   async importAll({ students, reminders, expenses = [] }) {
     await ready;
+    // A restore can bring back students from an older session, so the rollover
+    // probe must run again on the next page load even if this academic year
+    // was already checked before the restore.
+    rolloverCheckedYear = null;
     // Always snapshot the CURRENT state right before overwriting it, regardless of
     // whether the incoming data turns out to be good — this is the undo button for
     // "someone restored the wrong file by mistake".
