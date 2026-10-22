@@ -1889,7 +1889,12 @@ function FeeLedger({ user, onLogout }) {
         }
         @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
 
-        .wrap { min-height: 100vh; background: var(--bg); font-family: var(--sans); color: var(--ink); padding-bottom: 60px; -webkit-font-smoothing: antialiased; }
+        /* Grid-pattern layout: a faint 24px hairline grid sits behind the page
+           on its own layer, so it never competes with text — the solid cards
+           below cover it wherever content actually sits. Dark mode gets a
+           lighter, fainter grid so the pattern stays subtle there too. */
+        .wrap { min-height: 100vh; background-color: var(--bg); background-image: linear-gradient(rgba(0,84,95,0.07) 1px, transparent 1px), linear-gradient(90deg, rgba(0,84,95,0.07) 1px, transparent 1px); background-size: 24px 24px; font-family: var(--sans); color: var(--ink); padding-bottom: 60px; -webkit-font-smoothing: antialiased; }
+        .wrap.dark { background-image: linear-gradient(rgba(236,255,182,0.06) 1px, transparent 1px), linear-gradient(90deg, rgba(236,255,182,0.06) 1px, transparent 1px); }
         h1,h2,h3 { font-family: var(--display); }
         .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
         a { color: inherit; }
@@ -1934,23 +1939,32 @@ function FeeLedger({ user, onLogout }) {
         .meter-label { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--header-fg-mute); white-space: nowrap; }
         .meter-pct { font-family: var(--mono); font-size: 19px; font-weight: 700; color: var(--highlight); white-space: nowrap; letter-spacing: -0.3px; }
 
-        .stats-row { display: grid; grid-template-columns: repeat(2, 1fr); border: 1.5px solid var(--ink); border-top: none; margin-top: 16px; }
-        @media (min-width: 720px) { .stats-row { grid-template-columns: repeat(4, 1fr); } }
-        .stat-card { position:relative; background: var(--stat-bg); padding: 13px 16px; border-right: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft); }
-        .stat-card:nth-child(2n) { border-right: none; }
-        @media (min-width: 720px) { .stat-card:nth-child(2n) { border-right: 1px solid var(--line-soft); } .stat-card:last-child { border-right: none; } .stat-card { border-bottom: none; } }
-        .stat-card.wide { grid-column: 1 / -1; display:flex; align-items:baseline; justify-content:space-between; gap: 10px; }
+        /* Bento grid: 12 columns, one consistent 16px gap, tile size by
+           priority, not by content volume. The hero tile (balance due) spans
+           6 columns, ordinary metrics span 3, and the wide tile spans 8, so
+           the grid reads as a hierarchy instead of a strip of equal boxes.
+           DOM order matches visual order, so screen readers and keyboards
+           follow the same top-left-first reading as sighted users. */
+        .stats-row { display: grid; grid-template-columns: repeat(12, 1fr); gap: 16px; margin-top: 16px; }
+        .stat-card { position:relative; grid-column: span 3; background: var(--stat-bg); padding: 16px; border: 1.5px solid var(--ink); border-radius: 16px; box-shadow: 0 2px 8px rgba(0,84,95,0.05); transition: transform 0.15s ease, box-shadow 0.15s ease; }
+        .stat-card:hover { transform: translateY(-2px); box-shadow: 0 8px 20px rgba(0,84,95,0.10); }
+        .stat-card.span-4 { grid-column: span 4; }
+        .stat-card.span-6 { grid-column: span 6; }
+        .stat-card.span-8 { grid-column: span 8; }
+        .stat-card.span-12 { grid-column: span 12; }
+        .stat-card.hero .stat-value { font-size: 28px; }
+        .stat-card.wide { grid-column: span 8; display:flex; align-items:baseline; justify-content:space-between; gap: 10px; }
         .stat-card.wide .stat-label { margin-bottom: 0; }
         .stat-label { font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-mute); margin-bottom: 6px; font-weight: 500; }
         .stat-value { font-family: var(--mono); font-size: 19px; font-weight: 700; color: var(--ink); letter-spacing: -0.3px; }
         .stat-value.amber { color: var(--due); } .stat-value.red { color: var(--over); }
 
-        .note-banner { background: var(--card); border:1.5px solid var(--line-soft); border-left: 4px solid var(--accent); color: var(--text-soft); font-size:12.5px; line-height: 1.5; padding:10px 14px; margin: 14px 20px 0; max-width:1040px; margin-left:auto; margin-right:auto; }
-        .digest-banner { display:flex; align-items:center; justify-content:space-between; gap: 12px; flex-wrap:wrap; background: var(--card); border:1.5px solid var(--line-soft); border-left: 4px solid var(--over); color: var(--text-soft); font-size:12.5px; line-height: 1.5; padding:10px 14px; margin: 10px 20px 0; max-width:1040px; margin-left:auto; margin-right:auto; }
+        .note-banner { background: var(--card); border:1.5px solid var(--line-soft); border-left: 4px solid var(--accent); border-radius: 12px; color: var(--text-soft); font-size:12.5px; line-height: 1.5; padding:10px 14px; margin: 14px 20px 0; max-width:1040px; margin-left:auto; margin-right:auto; }
+        .digest-banner { display:flex; align-items:center; justify-content:space-between; gap: 12px; flex-wrap:wrap; background: var(--card); border:1.5px solid var(--line-soft); border-left: 4px solid var(--over); border-radius: 12px; color: var(--text-soft); font-size:12.5px; line-height: 1.5; padding:10px 14px; margin: 10px 20px 0; max-width:1040px; margin-left:auto; margin-right:auto; }
         .digest-text strong { color: var(--over); }
 
         .toolbar { max-width: 1080px; margin: 18px auto 0; padding: 0 20px; }
-        .toolbar-card { background: var(--card); border: 1.5px solid var(--ink); padding: 10px; display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+        .toolbar-card { background: var(--card); border: 1.5px solid var(--ink); border-radius: 12px; padding: 10px; display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
         .search-box { display:flex; align-items:center; gap:8px; flex:1; min-width: 170px; border:1.5px solid var(--line-soft); padding:8px 12px; background: var(--bg); transition: border-color 0.15s ease, background 0.15s ease; }
         .search-box:focus-within { border-color: var(--accent); background: var(--card); }
         .search-box input { border:none; outline:none; background:transparent; font-size: 14px; width:100%; color: var(--ink); font-family: var(--sans); }
@@ -2084,7 +2098,12 @@ function FeeLedger({ user, onLogout }) {
           .amt-sub { display: none; }
           .toolbar-card .btn span, .toolbar-card .btn { font-size: 12.5px; padding: 8px 10px; }
           .header { padding: 18px 16px 16px; }
-          .stats-row { grid-template-columns: repeat(2, 1fr); }
+          /* Phone: same bento logic on a 6-column grid — ordinary tiles take
+             half the width, hero and wide tiles take the full width. */
+          .stats-row { grid-template-columns: repeat(6, 1fr); gap: 12px; }
+          .stat-card { grid-column: span 3; }
+          .stat-card.span-4, .stat-card.span-6, .stat-card.span-8, .stat-card.span-12, .stat-card.wide { grid-column: span 6; }
+          .stat-card.hero .stat-value { font-size: 22px; }
           .modal { padding: 16px; max-height: 92vh; }
           .field-row { grid-template-columns: 1fr; }
           .bar-chart { gap: 6px; }
@@ -2154,30 +2173,30 @@ function FeeLedger({ user, onLogout }) {
                 </div>
 
                 <div className="stats-row">
-                  <div className="stat-card"><div className="stat-label">Students</div><div className="stat-value">{stats.count}</div></div>
+                  <div className="stat-card hero span-6"><div className="stat-label">Balance due</div><div className="stat-value amber">{money(stats.totalDue)}</div></div>
                   <div className="stat-card"><div className="stat-label">Collected</div><div className="stat-value">{money(stats.collected)}</div></div>
-                  <div className="stat-card"><div className="stat-label">Balance due</div><div className="stat-value amber">{money(stats.totalDue)}</div></div>
-                  <div className="stat-card"><div className="stat-label">Overdue</div><div className="stat-value red">{money(stats.overdueAmount)} ({stats.overdue})</div></div>
-                  <div className="stat-card wide"><div className="stat-label">Collected this month</div><div className="stat-value">{money(thisMonthCollected)}</div></div>
+                  <div className="stat-card"><div className="stat-label">Students</div><div className="stat-value">{stats.count}</div></div>
+                  <div className="stat-card span-8"><div className="stat-label">Collected this month</div><div className="stat-value">{money(thisMonthCollected)}</div></div>
+                  <div className="stat-card span-4"><div className="stat-label">Overdue</div><div className="stat-value red">{money(stats.overdueAmount)} ({stats.overdue})</div></div>
                 </div>
 
                 {(stats.transportDue > 0 || stats.transportCollected > 0) && (
                   <div className="stats-row">
-                    <div className="stat-card"><div className="stat-label">Transport collected</div><div className="stat-value">{money(stats.transportCollected)}</div></div>
-                    <div className="stat-card"><div className="stat-label">Transport due</div><div className="stat-value amber">{money(stats.transportDue)}</div></div>
+                    <div className="stat-card span-6"><div className="stat-label">Transport due</div><div className="stat-value amber">{money(stats.transportDue)}</div></div>
+                    <div className="stat-card span-6"><div className="stat-label">Transport collected</div><div className="stat-value">{money(stats.transportCollected)}</div></div>
                   </div>
                 )}
 
                 {(stats.annualFeeDue > 0 || stats.annualFeeCollected > 0) && (
                   <div className="stats-row">
-                    <div className="stat-card"><div className="stat-label">Annual fee collected</div><div className="stat-value">{money(stats.annualFeeCollected)}</div></div>
-                    <div className="stat-card"><div className="stat-label">Annual fee due</div><div className="stat-value amber">{money(stats.annualFeeDue)}</div></div>
+                    <div className="stat-card span-6"><div className="stat-label">Annual fee due</div><div className="stat-value amber">{money(stats.annualFeeDue)}</div></div>
+                    <div className="stat-card span-6"><div className="stat-label">Annual fee collected</div><div className="stat-value">{money(stats.annualFeeCollected)}</div></div>
                   </div>
                 )}
 
                 {stats.previousSessionDue > 0 && (
                   <div className="stats-row">
-                    <div className="stat-card"><div className="stat-label">Previous session due</div><div className="stat-value red">{money(stats.previousSessionDue)}</div></div>
+                    <div className="stat-card span-12"><div className="stat-label">Previous session due</div><div className="stat-value red">{money(stats.previousSessionDue)}</div></div>
                   </div>
                 )}
               </>
