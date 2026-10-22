@@ -320,6 +320,7 @@ function accruedInstallmentBalance(student, today = todayISO()) {
 // across everything" — tuition (accrued-to-date for installment plans, full
 // balance for full-plan students), transport, Annual Fee, and any carried-over
 // previous-session due, net of whatever's already been paid against each.
+// Kept for stats/exports, where "accrued" is the right meaning.
 function computeTotalPending(student) {
   const tuitionPending = isInstallmentPlan(student) && (student.installments || []).length
     ? accruedInstallmentBalance(student)
@@ -328,6 +329,23 @@ function computeTotalPending(student) {
   const annualFeePending = annualFeeComputed(student).balance;
   const previousPending = student.previousSessionDue || 0;
   return tuitionPending + transportPending + annualFeePending + previousPending;
+}
+
+// What WhatsApp reminders must quote: the ENTIRE fee still due, not just the
+// overdue/accrued part. For an installment-plan student this is the key
+// difference — withComputed() already derives total/paid from the whole
+// installments array, so total - paid is every remaining installment,
+// including ones not due yet, not just the ones due up to today. Transport,
+// Annual Fee, and previous-session dues are added in full on top of that.
+// Each component is floored at 0 so an overpayment on one charge can't
+// quietly shrink what another charge still owes.
+function computeEntireFeeDue(student) {
+  const s = withComputed(student);
+  const tuitionDue = Math.max(0, s.total - s.paid);
+  const transportDue = s.transportRate > 0 ? Math.max(0, transportComputed(s).balance) : 0;
+  const annualFeeDue = annualFeeComputed(s).balance;
+  const previousDue = Math.max(0, s.previousSessionDue || 0);
+  return tuitionDue + transportDue + annualFeeDue + previousDue;
 }
 
 // Builds a "collected per month" series for the last `months` months from every
@@ -400,12 +418,14 @@ function StampBadge({ status }) {
   );
 }
 
-// Reminder now states the parent's CUMULATIVE outstanding balance as of today —
-// every overdue/current installment, transport, Annual Fee, and any previous-session
-// due, all rolled into one figure — instead of just the single next-due period.
+// Reminder states the parent's ENTIRE outstanding fee — every remaining
+// installment (including ones not due yet), transport, Annual Fee, and any
+// previous-session due, all rolled into one figure — instead of just the
+// overdue/accrued part. "Up to date" wording was dropped with it: this figure
+// deliberately goes beyond what is due today.
 function defaultTemplate(student) {
-  const totalPending = computeTotalPending(student);
-  return `Dear Parent, this is a reminder from ${student.school} that the total pending fee for ${student.name} (${student.cls}) up to date is ${money(totalPending)}. Kindly pay at the earliest. Thank you.`;
+  const totalDue = computeEntireFeeDue(student);
+  return `Dear Parent, this is a reminder from ${student.school} that the total fee due for ${student.name} (${student.cls}) is ${money(totalDue)}. Kindly pay at the earliest. Thank you.`;
 }
 
 function initials(name) {
@@ -1035,7 +1055,9 @@ function FeeLedger({ user, onLogout }) {
     const today = todayISO(); // hoisted: was recomputed for every student
     return students.map((raw) => {
       const s = withComputed(raw);
-      return { ...s, status: statusOf(s, today), balance: s.total - s.paid, daysOverdue: -daysBetween(s.due, today) };
+      // Precomputed once here so the search filter and every rendered row
+      // don't redo the same string normalisation on every keystroke/render.
+      return { ...s, status: statusOf(s, today), balance: s.total - s.paid, daysOverdue: -daysBetween(s.due, today), nameKey: normName(raw.name), nameLower: String(raw.name || "").toLowerCase() };
     });
   }, [students]);
 
@@ -1060,7 +1082,7 @@ function FeeLedger({ user, onLogout }) {
       (s) =>
         (!transportOnly || s.transportRate > 0) &&
         (statusFilter === "all" || s.status === statusFilter) &&
-        (!q || s.name.toLowerCase().includes(q))
+        (!q || s.nameLower.includes(q))
     );
     if (sortBy === "name") list.sort((a, b) => a.name.localeCompare(b.name));
     else if (sortBy === "balance") list.sort((a, b) => b.balance - a.balance);
@@ -1122,7 +1144,8 @@ function FeeLedger({ user, onLogout }) {
 
   const digest = useMemo(() => {
     const pool = filtered; // already scoped to schoolFilter/status/search
-    const dueSoon = pool.filter((s) => s.status === "pending" && daysBetween(s.due, todayISO()) <= 3);
+    const today = todayISO(); // hoisted: was recomputed for every student
+    const dueSoon = pool.filter((s) => s.status === "pending" && daysBetween(s.due, today) <= 3);
     const overdue = pool.filter((s) => s.status === "overdue");
     const needsReminderList = pool.filter((s) => needsReminder(s, reminders));
     return { dueSoon, overdue, needsReminderList };
@@ -1322,6 +1345,10 @@ function FeeLedger({ user, onLogout }) {
     return collectionSeries(pool, 6);
   }, [students, schoolFilter]);
 
+  // Hoisted out of the bar-chart render below, where it was recomputed for
+  // every single bar (a fresh .map over the series each time).
+  const monthlySeriesMax = useMemo(() => Math.max(1, ...monthlySeries.map((x) => x.amount)), [monthlySeries]);
+
   const classBreakdown = useMemo(() => {
     // Reuses `decorated` rather than running withComputed over every student again.
     const groups = new Map();
@@ -1350,7 +1377,8 @@ function FeeLedger({ user, onLogout }) {
   }
 
   async function logSingleReminder(s) {
-    const entry = { studentId: s.id, name: s.name, school: s.school, phone: s.phone, balance: computeTotalPending(s), message: defaultTemplate(s) };
+    // Balance logged here must match the figure in the WhatsApp message itself.
+    const entry = { studentId: s.id, name: s.name, school: s.school, phone: s.phone, balance: computeEntireFeeDue(s), message: defaultTemplate(s) };
     try {
       const saved = await api.logReminder(entry);
       setReminders((r) => [saved, ...r]);
@@ -2292,7 +2320,7 @@ function FeeLedger({ user, onLogout }) {
                       <div className="row-sub">
                         {s.cls} · {s.school} · Due {formatDate(s.due)}
                         {s.status === "overdue" && <span style={{ color: "var(--over)", fontWeight: 600 }}> · {s.daysOverdue}d overdue</span>}
-                        {duplicateNames.has(normName(s.name)) && s.fatherName && <span> · Father: {s.fatherName}</span>}
+                        {duplicateNames.has(s.nameKey) && s.fatherName && <span> · Father: {s.fatherName}</span>}
                       </div>
                       {installment && (
                         <span className="plan-chip">{planLabel(s)} · {paidCount}/{totalCount} paid</span>
@@ -2950,7 +2978,7 @@ function FeeLedger({ user, onLogout }) {
               <span style={{ color: "var(--over)" }}><strong>{money(previousSessionStudent.previousSessionDue)}</strong> still due from before the current session</span>
             </p>
             <p style={{ fontSize: 12, color: "var(--text-mute)", marginBottom: 16 }}>
-              This is tracked separately from {previousSessionStudent.name}'s current-session balance — it's never added into "Balance due" or the current-session reminders, and shows up as its own line in messages when it's outstanding.
+              This is tracked separately from {previousSessionStudent.name}'s current-session balance, but it is included in the total fee due shown in WhatsApp reminders, so parents see the full outstanding amount.
             </p>
             <div style={{ paddingTop: 12, borderTop: "1px solid var(--border)" }}>
               <PaymentForm
@@ -3015,8 +3043,7 @@ function FeeLedger({ user, onLogout }) {
             <div className="report-section-label">Collected — last 6 months</div>
             <div className="bar-chart">
               {monthlySeries.map((m) => {
-                const max = Math.max(1, ...monthlySeries.map((x) => x.amount));
-                const h = Math.round((m.amount / max) * 100);
+                const h = Math.round((m.amount / monthlySeriesMax) * 100);
                 return (
                   <div className="bar-col" key={m.key}>
                     <div className="bar-value mono">{m.amount > 0 ? money(m.amount) : ""}</div>

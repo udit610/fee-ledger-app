@@ -13,6 +13,10 @@ export default defineConfig({
         // import in App.jsx — so it doesn't need listing here.)
         manualChunks: {
           react: ["react", "react-dom"],
+          // Same caching logic as React above: icons barely change between
+          // deploys, so they get their own content-hashed file instead of
+          // being re-downloaded inside the app chunk on every release.
+          icons: ["lucide-react"],
         },
       },
     },
