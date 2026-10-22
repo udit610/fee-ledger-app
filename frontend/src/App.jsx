@@ -270,8 +270,12 @@ function monthKey(iso) {
   return String(iso || "").slice(0, 7); // "YYYY-MM"
 }
 function monthLabel(key) {
+  // Short 3-letter month ("Sep 26", not "Sept 26") so the label fits on one
+  // line in the narrow phone chart columns instead of wrapping to two lines
+  // and making that column look different from the others.
   const [y, m] = key.split("-").map(Number);
-  return new Date(y, m - 1, 1).toLocaleDateString("en-IN", { month: "short", year: "2-digit" });
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  return `${months[m - 1]} ${String(y).slice(2)}`;
 }
 
 // The 11 chargeable transport months for the CURRENT academic year (April–March,
@@ -573,16 +577,13 @@ function GoogleGate({ onLoggedIn, notice }) {
     <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, background: "#F4F5F3" }}>
       <style>{`${FONT_IMPORT}`}</style>
       <div style={{ background: "#FFFFFF", border: "1px solid #E5E7EB", padding: 32, width: "100%", maxWidth: 340, textAlign: "center", fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, sans-serif" }}>
-        <div style={{ position: "relative", width: 42, height: 42, borderRadius: 4, background: "#134E4A", color: "#FFFFFF", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 18px", fontWeight: 700, fontSize: 14, letterSpacing: -0.2, fontFamily: "'Space Grotesk', sans-serif", overflow: "hidden" }}>
-          FL
-          <div style={{ position: "absolute", left: 0, right: 0, bottom: 0, height: 3, background: "#0F766E" }} />
-        </div>
+        <img src="/favicon.svg" alt="" style={{ width: 42, height: 42, borderRadius: 8, display: "block", margin: "0 auto 18px" }} />
         <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 20, fontWeight: 700, color: "#111827", marginBottom: 6, letterSpacing: -0.2 }}>Fee Ledger</div>
         <p style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, color: "#4D8189", marginBottom: 24, lineHeight: 1.6 }}>Sign in with a Google account authorized for this ledger.</p>
         <div ref={btnRef} style={{ display: "flex", justifyContent: "center" }} />
-        {!GOOGLE_CLIENT_ID && <p style={{ color: "#C4102A", fontSize: 12, marginTop: 14 }}>VITE_GOOGLE_CLIENT_ID is not set — see .env.example</p>}
+        {!GOOGLE_CLIENT_ID && <p style={{ color: "#B91C1C", fontSize: 12, marginTop: 14 }}>VITE_GOOGLE_CLIENT_ID is not set — see .env.example</p>}
         {notice && <p style={{ color: "#4D8189", fontSize: 12.5, marginTop: 14 }}>{notice}</p>}
-        {error && <p style={{ color: "#C4102A", fontSize: 12.5, marginTop: 14 }}>{error}</p>}
+        {error && <p style={{ color: "#B91C1C", fontSize: 12.5, marginTop: 14 }}>{error}</p>}
       </div>
     </div>
   );
@@ -1876,7 +1877,7 @@ function FeeLedger({ user, onLogout }) {
           --highlight: #0F766E; --highlight-ink: #FFFFFF; --highlight-tint: rgba(15,118,110,0.12);
           --paid: #059669; --paid-bg: rgba(5,150,105,0.12);
           --due: #D97706; --due-bg: rgba(217,119,6,0.1);
-          --over: #DC2626; --over-bg: rgba(220,38,38,0.08);
+          --over: #B91C1C; --over-bg: rgba(185,28,28,0.10);
           --whatsapp: #0F766E; --whatsapp-hover: #115E59; --whatsapp-ink: #FFFFFF;
           --header-fg: #F8FAFC; --header-fg-mute: rgba(248,250,252,0.65);
           --overlay: rgba(17,24,39,0.45);
@@ -1894,7 +1895,7 @@ function FeeLedger({ user, onLogout }) {
           --highlight: #2DD4BF; --highlight-ink: #111827; --highlight-tint: rgba(45,212,191,0.15);
           --paid: #34D399; --paid-bg: rgba(52,211,153,0.15);
           --due: #FBBF24; --due-bg: rgba(251,191,36,0.12);
-          --over: #F87171; --over-bg: rgba(248,113,113,0.12);
+          --over: #EF4444; --over-bg: rgba(239,68,68,0.14);
           --whatsapp: #2DD4BF; --whatsapp-hover: #5EEAD4; --whatsapp-ink: #111827;
           --overlay: rgba(0,0,0,0.6);
         }
@@ -1926,7 +1927,7 @@ function FeeLedger({ user, onLogout }) {
         .brand-mark { flex-shrink: 0; }
         .brand-title { overflow-wrap: anywhere; }
         .brand-sub { overflow-wrap: anywhere; }
-        .brand-mark { width: 34px; height: 34px; border-radius: 4px; background: var(--highlight); color: var(--highlight-ink); display:flex; align-items:center; justify-content:center; font-family: var(--display); font-weight:700; font-size: 13px; letter-spacing: -0.2px; }
+        .brand-mark { width: 34px; height: 34px; border-radius: 8px; display:block; }
         .brand-title { font-family: var(--display); font-size: 19px; font-weight:700; letter-spacing: -0.2px; color: var(--header-fg); }
         .brand-sub { font-family: var(--mono); font-size: 11px; color: rgba(248,250,252,0.5); letter-spacing: 0.2px; margin-top: 2px; }
 
@@ -2122,11 +2123,17 @@ function FeeLedger({ user, onLogout }) {
 
         .report-section-label { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color:var(--text-mute); margin-bottom: 10px; font-weight: 600; }
         .bar-chart { display:flex; align-items:flex-end; gap: 10px; height: 140px; padding: 0 4px; }
-        .bar-col { flex:1; display:flex; flex-direction:column; align-items:center; height:100%; justify-content:flex-end; }
+        .bar-col { flex:1; min-width: 0; display:flex; flex-direction:column; align-items:center; height:100%; justify-content:flex-end; }
         .bar-value { font-family: var(--mono); font-size: 10px; color: var(--text-mute); margin-bottom: 4px; white-space:nowrap; }
-        .bar-track { width: 100%; max-width: 34px; flex:1; display:flex; align-items:flex-end; background: var(--card-alt); border: 1px solid var(--line-soft); border-bottom: none; overflow:hidden; }
-        .bar-fill { width:100%; background: var(--accent); transition: height 0.4s ease; min-height: 2px; }
-        .bar-label { font-family: var(--mono); font-size: 10px; color: var(--text-mute); margin-top: 6px; }
+        /* Chart fix: the old track was a full-height grey bar for every month,
+           so a ₹0 month and a ₹3,000 month both looked like tall bars and the
+           tiny teal fill floated at the bottom of the grey block. The track is
+           now transparent, so only the teal fill is a bar, and its height is
+           proportional to the month's collection. A ₹0 month shows just the
+           baseline, a tiny month shows a tiny bar. */
+        .bar-track { width: 100%; max-width: 34px; flex:1; display:flex; align-items:flex-end; background: transparent; border: none; border-bottom: 1.5px solid var(--line-soft); overflow: visible; }
+        .bar-fill { width:100%; background: var(--accent); transition: height 0.4s ease; border-radius: 3px 3px 0 0; }
+        .bar-label { font-family: var(--mono); font-size: 10px; color: var(--text-mute); margin-top: 6px; white-space:nowrap; }
         .report-table { width:100%; border-collapse: collapse; font-size: 12.5px; }
         .report-table th { text-align:left; font-family: var(--mono); font-size: 10px; text-transform:uppercase; letter-spacing:0.4px; color:var(--text-mute); padding: 6px 8px; border-bottom: 1.5px solid var(--ink); position: sticky; top:0; background: var(--card); }
         .report-table td { padding: 7px 8px; border-bottom: 1px solid var(--line-soft); }
@@ -2174,13 +2181,14 @@ function FeeLedger({ user, onLogout }) {
           .modal { padding: 16px; max-height: 92vh; }
           .field-row { grid-template-columns: 1fr; }
           .bar-chart { gap: 6px; }
+          .bar-label, .bar-value { font-size: 9px; }
         }
       `}</style>
 
       <div className="header">
         <div className="header-top">
           <div className="brand">
-            <div className="brand-mark">FL</div>
+            <img className="brand-mark" src="/favicon.svg" alt="" />
             <div>
               <div className="brand-title">Fee Ledger</div>
               <div className="brand-sub">{user.email}</div>
@@ -2254,7 +2262,9 @@ function FeeLedger({ user, onLogout }) {
               )}
               <div className="stat-card chart"><div className="stat-label">Collected — last 6 months</div><div className="bar-chart">
                 {monthlySeries.map((m) => {
-                  const h = Math.round((m.amount / monthlySeriesMax) * 100);
+                  // A non-zero month gets at least a 4% bar so ₹3,000 is visible
+                  // at all next to a ₹12,63,900 month, instead of a 0% fill.
+                  const h = m.amount > 0 ? Math.max(4, Math.round((m.amount / monthlySeriesMax) * 100)) : 0;
                   return (
                     <div className="bar-col" key={m.key}>
                       <div className="bar-value mono">{m.amount > 0 ? money(m.amount) : ""}</div>
@@ -3136,7 +3146,7 @@ function FeeLedger({ user, onLogout }) {
             <div className="report-section-label">Collected — last 6 months</div>
             <div className="bar-chart">
               {monthlySeries.map((m) => {
-                const h = Math.round((m.amount / monthlySeriesMax) * 100);
+                const h = m.amount > 0 ? Math.max(4, Math.round((m.amount / monthlySeriesMax) * 100)) : 0;
                 return (
                   <div className="bar-col" key={m.key}>
                     <div className="bar-value mono">{m.amount > 0 ? money(m.amount) : ""}</div>
