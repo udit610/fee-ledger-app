@@ -1915,7 +1915,17 @@ function FeeLedger({ user, onLogout }) {
            light/dark mode — it's the one fixed anchor of the brand. */
         .header { background: #134E4A; border-bottom: 3px solid var(--highlight); color: var(--header-fg); padding: 20px 24px 18px; position: relative; }
         .header-top { display:flex; align-items:center; justify-content:space-between; gap: 12px; flex-wrap: wrap; }
-        .brand { display:flex; align-items:center; gap:10px; }
+        /* Mobile overflow fix: flex items default to min-width auto, so the
+           brand (with its unbreakable email) and the controls row could not
+           shrink and pushed the header wider than a 440px phone. Allowing
+           them to shrink, and letting the email break, is what makes the
+           header actually fit instead of just wrapping. */
+        .header-top > * { min-width: 0; }
+        .brand { display:flex; align-items:center; gap:10px; min-width: 0; flex: 1 1 auto; }
+        .brand > div { min-width: 0; }
+        .brand-mark { flex-shrink: 0; }
+        .brand-title { overflow-wrap: anywhere; }
+        .brand-sub { overflow-wrap: anywhere; }
         .brand-mark { width: 34px; height: 34px; border-radius: 4px; background: var(--highlight); color: var(--highlight-ink); display:flex; align-items:center; justify-content:center; font-family: var(--display); font-weight:700; font-size: 13px; letter-spacing: -0.2px; }
         .brand-title { font-family: var(--display); font-size: 19px; font-weight:700; letter-spacing: -0.2px; color: var(--header-fg); }
         .brand-sub { font-family: var(--mono); font-size: 11px; color: rgba(248,250,252,0.5); letter-spacing: 0.2px; margin-top: 2px; }
@@ -1944,8 +1954,9 @@ function FeeLedger({ user, onLogout }) {
         /* Signature element: the collection meter, styled like a charge/fill gauge —
            flat lime fill (no gradient) on a translucent black track, mono percentage.
            This is the one place the page allows itself to feel bold. */
-        .meter-row { display:flex; align-items:baseline; gap: 14px; margin-top: 22px; }
-        .meter-track { flex:1; height: 10px; background: rgba(255,255,255,0.14); overflow:hidden; position: relative; align-self: center; }
+        .meter-row { display:flex; align-items:baseline; gap: 14px; margin-top: 22px; min-width: 0; }
+        .meter-track { flex:1 1 80px; min-width: 0; height: 10px; background: rgba(255,255,255,0.14); overflow:hidden; position: relative; align-self: center; }
+        .meter-label, .meter-pct { flex-shrink: 0; }
         .meter-fill { height: 100%; background: #2DD4BF; transition: width 0.6s cubic-bezier(0.22,1,0.36,1); }
         .meter-label { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--header-fg-mute); white-space: nowrap; }
         .meter-pct { font-family: var(--mono); font-size: 19px; font-weight: 700; color: #5EEAD4; white-space: nowrap; letter-spacing: -0.3px; }
@@ -1973,7 +1984,8 @@ function FeeLedger({ user, onLogout }) {
            and student list below it, so the grid and the table line up. */
         .overview { max-width: 1080px; margin: 18px auto 0; padding: 0 20px; }
         .overview-grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 16px; }
-        .overview .stat-card { padding: 20px; border-radius: 20px; }
+        .overview .stat-card { padding: 20px; border-radius: 20px; min-width: 0; }
+        .overview .stat-value { overflow-wrap: anywhere; }
         .overview .stat-value { font-family: var(--display); font-size: 28px; letter-spacing: -0.5px; }
         /* Hero keeps the header's fixed teal, not the theme ink, so it stays
            readable in dark mode too (dark-mode ink is pale lime). */
@@ -2008,7 +2020,7 @@ function FeeLedger({ user, onLogout }) {
         .segmented { display:flex; background: var(--bg); border: 1.5px solid var(--line-soft); padding: 2px; gap: 2px; }
         .segmented button { border:none; background:transparent; padding: 7px 11px; font-size: 12.5px; font-weight: 600; color: var(--text-soft); cursor: pointer; transition: background 0.15s ease, color 0.15s ease; white-space: nowrap; font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.3px; }
         .segmented button.active { background: var(--highlight); color: var(--highlight-ink); }
-        .view-tabs { margin-top: 18px; display: inline-flex; background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.22); }
+        .view-tabs { margin-top: 18px; display: inline-flex; flex-wrap: wrap; max-width: 100%; background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.22); }
         .view-tabs button { color: rgba(248,250,252,0.6); }
         .view-tabs button.active { background: var(--highlight); color: var(--highlight-ink); }
 
@@ -2131,6 +2143,22 @@ function FeeLedger({ user, onLogout }) {
           .amt-sub { display: none; }
           .toolbar-card .btn span, .toolbar-card .btn { font-size: 12.5px; padding: 8px 10px; }
           .header { padding: 18px 16px 16px; }
+          /* Phone overflow fixes for the screenshot at 440px: nothing in the
+             header may force the page wider than the screen. The brand and
+             controls shrink, the tabs share the width instead of overflowing
+             as one nowrap strip, the meter bar shrinks, and the search box
+             takes a full row instead of squeezing the filter tabs off-screen. */
+          .wrap { overflow-x: clip; }
+          .brand-title { font-size: 18px; }
+          .brand-sub { font-size: 10px; }
+          .header-top { gap: 10px; }
+          .view-tabs { width: 100%; }
+          .view-tabs button { flex: 1 1 auto; text-align: center; padding: 7px 6px; }
+          .meter-row { gap: 10px; margin-top: 18px; }
+          .meter-pct { font-size: 16px; }
+          .search-box { flex: 1 1 100%; min-width: 0; }
+          .segmented { flex-wrap: wrap; }
+          .row-name { min-width: 0; overflow-wrap: anywhere; }
           /* Phone: same bento logic on a 6-column grid — ordinary tiles take
              half the width, hero and wide tiles take the full width. */
           .stats-row { grid-template-columns: repeat(6, 1fr); gap: 12px; }
@@ -2158,7 +2186,7 @@ function FeeLedger({ user, onLogout }) {
               <div className="brand-sub">{user.email}</div>
             </div>
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", minWidth: 0 }}>
             {allowedSchools.length > 1 && (
               <div className="dropdown-wrap" ref={schoolMenuRef}>
                 <button className="dropdown-trigger" onClick={() => setSchoolMenuOpen((o) => !o)}>
