@@ -1142,6 +1142,12 @@ function FeeLedger({ user, onLogout }) {
 
   const collectionPct = stats.totalFees > 0 ? Math.round((stats.collected / stats.totalFees) * 100) : 0;
 
+  // The mockup hero figure: the ENTIRE outstanding fee for the scoped
+  // students, not just tuition and not just what is overdue — the same
+  // figure the WhatsApp reminders quote, including future installments,
+  // transport, Annual Fee, and previous-session dues.
+  const entireDue = useMemo(() => scoped.reduce((a, s) => a + computeEntireFeeDue(s), 0), [scoped]);
+
   const digest = useMemo(() => {
     const pool = filtered; // already scoped to schoolFilter/status/search
     const today = todayISO(); // hoisted: was recomputed for every student
@@ -1955,6 +1961,28 @@ function FeeLedger({ user, onLogout }) {
         .stat-card.hero .stat-value { font-size: 28px; }
         .stat-card.wide { grid-column: span 8; display:flex; align-items:baseline; justify-content:space-between; gap: 10px; }
         .stat-card.wide .stat-label { margin-bottom: 0; }
+
+        /* Faithful mockup overview: the tiles live OUTSIDE the teal header,
+           on the light grid-pattern page background, in one 12-column bento
+           with a centred 1080px container — the same width as the toolbar
+           and student list below it, so the grid and the table line up. */
+        .overview { max-width: 1080px; margin: 18px auto 0; padding: 0 20px; }
+        .overview-grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 16px; }
+        .overview .stat-card { padding: 20px; border-radius: 20px; }
+        .overview .stat-value { font-family: var(--display); font-size: 28px; letter-spacing: -0.5px; }
+        /* Hero keeps the header's fixed teal, not the theme ink, so it stays
+           readable in dark mode too (dark-mode ink is pale lime). */
+        .overview .stat-card.hero { grid-column: span 8; background: #00545F; color: #ECFFB6; border-color: #00545F; }
+        .overview .stat-card.hero .stat-label { color: rgba(236,255,182,0.55); }
+        .overview .stat-card.hero .stat-value { font-size: 40px; color: #D6FB00; }
+        .overview .stat-card.hero .tile-sub { color: rgba(236,255,182,0.55); }
+        .overview .stat-card.kpi { grid-column: span 4; }
+        .overview .stat-card.chart { grid-column: span 8; }
+        .overview .stat-card.action { grid-column: span 4; display:flex; flex-direction:column; }
+        .overview .stat-card.action .tile-sub { flex: 1; }
+        .tile-sub { font-size: 12.5px; color: var(--text-soft); margin-top: 6px; line-height: 1.45; }
+        .tile-action { margin-top: 14px; }
+        .overview .bar-chart { height: 160px; }
         .stat-label { font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-mute); margin-bottom: 6px; font-weight: 500; }
         .stat-value { font-family: var(--mono); font-size: 19px; font-weight: 700; color: var(--ink); letter-spacing: -0.3px; }
         .stat-value.amber { color: var(--due); } .stat-value.red { color: var(--over); }
@@ -2104,6 +2132,12 @@ function FeeLedger({ user, onLogout }) {
           .stat-card { grid-column: span 3; }
           .stat-card.span-4, .stat-card.span-6, .stat-card.span-8, .stat-card.span-12, .stat-card.wide { grid-column: span 6; }
           .stat-card.hero .stat-value { font-size: 22px; }
+          /* Phone overview: KPI tiles two per row, hero/chart/action full width. */
+          .overview-grid { grid-template-columns: repeat(6, 1fr); gap: 12px; }
+          .overview .stat-card.kpi { grid-column: span 3; }
+          .overview .stat-card.hero, .overview .stat-card.chart, .overview .stat-card.action { grid-column: span 6; }
+          .overview .stat-card.hero .stat-value { font-size: 30px; }
+          .overview .stat-value { font-size: 22px; }
           .modal { padding: 16px; max-height: 92vh; }
           .field-row { grid-template-columns: 1fr; }
           .bar-chart { gap: 6px; }
@@ -2160,66 +2194,73 @@ function FeeLedger({ user, onLogout }) {
           {!isCollector && <button className={view === "history" ? "active" : ""} onClick={() => setView("history")}>History</button>}
         </div>
 
-        {view === "ledger" ? (
-          <>
-            {!isCollector && (
-              <>
-                <div className="meter-row">
-                  <span className="meter-label">Collected</span>
-                  <div className="meter-track">
-                    <div className="meter-fill" style={{ width: `${collectionPct}%` }} />
-                  </div>
-                  <span className="meter-pct mono">{collectionPct}%</span>
-                </div>
+        {view === "ledger" && !isCollector && (
+          <div className="meter-row">
+            <span className="meter-label">Collected</span>
+            <div className="meter-track">
+              <div className="meter-fill" style={{ width: `${collectionPct}%` }} />
+            </div>
+            <span className="meter-pct mono">{collectionPct}%</span>
+          </div>
+        )}
+      </div>
 
-                <div className="stats-row">
-                  <div className="stat-card hero span-6"><div className="stat-label">Balance due</div><div className="stat-value amber">{money(stats.totalDue)}</div></div>
-                  <div className="stat-card"><div className="stat-label">Collected</div><div className="stat-value">{money(stats.collected)}</div></div>
-                  <div className="stat-card"><div className="stat-label">Students</div><div className="stat-value">{stats.count}</div></div>
-                  <div className="stat-card span-8"><div className="stat-label">Collected this month</div><div className="stat-value">{money(thisMonthCollected)}</div></div>
-                  <div className="stat-card span-4"><div className="stat-label">Overdue</div><div className="stat-value red">{money(stats.overdueAmount)} ({stats.overdue})</div></div>
-                </div>
-
-                {(stats.transportDue > 0 || stats.transportCollected > 0) && (
-                  <div className="stats-row">
-                    <div className="stat-card span-6"><div className="stat-label">Transport due</div><div className="stat-value amber">{money(stats.transportDue)}</div></div>
-                    <div className="stat-card span-6"><div className="stat-label">Transport collected</div><div className="stat-value">{money(stats.transportCollected)}</div></div>
+      {(view === "history" || !isCollector) && (
+        <div className="overview">
+          {view === "ledger" ? (
+            <div className="overview-grid">
+              <div className="stat-card hero"><div className="stat-label">Total fee due</div><div className="stat-value">{money(entireDue)}</div><div className="tile-sub">{schoolFilter === "All Schools" ? "All schools" : schoolFilter} · {stats.count} students · Includes future installments, transport, Annual Fee and previous-session dues, the same figure the WhatsApp reminders quote.</div></div>
+              <div className="stat-card kpi"><div className="stat-label">Overdue</div><div className="stat-value red">{money(stats.overdueAmount)}</div><div className="tile-sub">{stats.overdue} students overdue on the amount due so far</div></div>
+              <div className="stat-card kpi"><div className="stat-label">Collected this month</div><div className="stat-value">{money(thisMonthCollected)}</div><div className="tile-sub">{collectionPct}% of all fees collected overall</div></div>
+              <div className="stat-card kpi"><div className="stat-label">Due in 3 days</div><div className="stat-value">{digest.dueSoon.length}</div><div className="tile-sub">students with a payment due within 3 days</div></div>
+              {(stats.transportDue > 0 || stats.transportCollected > 0 || stats.annualFeeDue > 0 || stats.annualFeeCollected > 0) && (
+                <div className="stat-card kpi"><div className="stat-label">Transport + Annual Fee due</div><div className="stat-value amber">{money(stats.transportDue + stats.annualFeeDue)}</div><div className="tile-sub">Transport {money(stats.transportDue)} · Annual Fee {money(stats.annualFeeDue)}</div></div>
+              )}
+              {stats.previousSessionDue > 0 && (
+                <div className="stat-card span-12"><div className="stat-label">Previous session due</div><div className="stat-value red">{money(stats.previousSessionDue)}</div></div>
+              )}
+              <div className="stat-card chart"><div className="stat-label">Collected — last 6 months</div><div className="bar-chart">
+                {monthlySeries.map((m) => {
+                  const h = Math.round((m.amount / monthlySeriesMax) * 100);
+                  return (
+                    <div className="bar-col" key={m.key}>
+                      <div className="bar-value mono">{m.amount > 0 ? money(m.amount) : ""}</div>
+                      <div className="bar-track"><div className="bar-fill" style={{ height: `${h}%` }} /></div>
+                      <div className="bar-label">{m.label}</div>
+                    </div>
+                  );
+                })}
+              </div><div className="tile-sub">{money(monthlySeries.reduce((a, m) => a + m.amount, 0))} collected in the last 6 months, scoped to {schoolFilter}.</div></div>
+              <div className="stat-card action"><div className="stat-label">Next action</div><div className="stat-value">{digest.needsReminderList.length}</div><div className="tile-sub">parents not reminded in the last 7 days. Each message quotes the entire fee due.</div>
+                {digest.needsReminderList.length > 0 && (
+                  <div className="tile-action">
+                    <button
+                      className="btn btn-whatsapp"
+                      onClick={() => { setSelected(new Set(digest.needsReminderList.map((s) => s.id))); setShowReminderPanel(true); }}
+                    >
+                      <MessageCircle size={14} /> Send {digest.needsReminderList.length} WhatsApp reminders
+                    </button>
                   </div>
                 )}
-
-                {(stats.annualFeeDue > 0 || stats.annualFeeCollected > 0) && (
-                  <div className="stats-row">
-                    <div className="stat-card span-6"><div className="stat-label">Annual fee due</div><div className="stat-value amber">{money(stats.annualFeeDue)}</div></div>
-                    <div className="stat-card span-6"><div className="stat-label">Annual fee collected</div><div className="stat-value">{money(stats.annualFeeCollected)}</div></div>
-                  </div>
-                )}
-
-                {stats.previousSessionDue > 0 && (
-                  <div className="stats-row">
-                    <div className="stat-card span-12"><div className="stat-label">Previous session due</div><div className="stat-value red">{money(stats.previousSessionDue)}</div></div>
-                  </div>
-                )}
-              </>
-            )}
-          </>
-        ) : view === "expenses" ? (
-          !isCollector && (
-            <div className="stats-row">
+              </div>
+            </div>
+          ) : view === "expenses" ? (
+            <div className="overview-grid">
               <div className="stat-card"><div className="stat-label">Total spent</div><div className="stat-value">{money(expenseStats.totalSpent)}</div></div>
               <div className="stat-card"><div className="stat-label">Spent this month</div><div className="stat-value">{money(expenseStats.spentThisMonth)}</div></div>
               <div className="stat-card"><div className="stat-label">Net this month</div><div className={`stat-value ${expenseStats.netThisMonth < 0 ? "red" : ""}`}>{money(expenseStats.netThisMonth)}</div></div>
               <div className="stat-card"><div className="stat-label">Categories</div><div className="stat-value">{expenseStats.categories}</div></div>
             </div>
-          )
-        ) : (
-          <div className="stats-row">
-            <div className="stat-card"><div className="stat-label">Actions today</div><div className="stat-value">{activityCounts.today}</div></div>
-            <div className="stat-card"><div className="stat-label">Actions this month</div><div className="stat-value">{activityCounts.month}</div></div>
-            <div className="stat-card"><div className="stat-label">Actions this year</div><div className="stat-value">{activityCounts.year}</div></div>
-            <div className="stat-card"><div className="stat-label">Staff involved</div><div className="stat-value">{activityStaffList.length - 1}</div></div>
-          </div>
-        )}
-      </div>
+          ) : (
+            <div className="overview-grid">
+              <div className="stat-card"><div className="stat-label">Actions today</div><div className="stat-value">{activityCounts.today}</div></div>
+              <div className="stat-card"><div className="stat-label">Actions this month</div><div className="stat-value">{activityCounts.month}</div></div>
+              <div className="stat-card"><div className="stat-label">Actions this year</div><div className="stat-value">{activityCounts.year}</div></div>
+              <div className="stat-card"><div className="stat-label">Staff involved</div><div className="stat-value">{activityStaffList.length - 1}</div></div>
+            </div>
+          )}
+        </div>
+      )}
 
       {view === "ledger" ? (
         <>
