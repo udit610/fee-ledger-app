@@ -570,14 +570,14 @@ function GoogleGate({ onLoggedIn, notice }) {
   }, []);
 
   return (
-    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, background: "#ECFFB6" }}>
+    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, background: "#F4F5F3" }}>
       <style>{`${FONT_IMPORT}`}</style>
-      <div style={{ background: "#F9FFE6", border: "1.5px solid #00545F", padding: 32, width: "100%", maxWidth: 340, textAlign: "center", fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, sans-serif" }}>
-        <div style={{ position: "relative", width: 42, height: 42, borderRadius: 4, background: "#00545F", color: "#ECFFB6", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 18px", fontWeight: 700, fontSize: 14, letterSpacing: -0.2, fontFamily: "'Space Grotesk', sans-serif", overflow: "hidden" }}>
+      <div style={{ background: "#FFFFFF", border: "1px solid #E5E7EB", padding: 32, width: "100%", maxWidth: 340, textAlign: "center", fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, sans-serif" }}>
+        <div style={{ position: "relative", width: 42, height: 42, borderRadius: 4, background: "#134E4A", color: "#FFFFFF", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 18px", fontWeight: 700, fontSize: 14, letterSpacing: -0.2, fontFamily: "'Space Grotesk', sans-serif", overflow: "hidden" }}>
           FL
-          <div style={{ position: "absolute", left: 0, right: 0, bottom: 0, height: 3, background: "#D6FB00" }} />
+          <div style={{ position: "absolute", left: 0, right: 0, bottom: 0, height: 3, background: "#0F766E" }} />
         </div>
-        <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 20, fontWeight: 700, color: "#00545F", marginBottom: 6, letterSpacing: -0.2 }}>Fee Ledger</div>
+        <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 20, fontWeight: 700, color: "#111827", marginBottom: 6, letterSpacing: -0.2 }}>Fee Ledger</div>
         <p style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, color: "#4D8189", marginBottom: 24, lineHeight: 1.6 }}>Sign in with a Google account authorized for this ledger.</p>
         <div ref={btnRef} style={{ display: "flex", justifyContent: "center" }} />
         {!GOOGLE_CLIENT_ID && <p style={{ color: "#C4102A", fontSize: 12, marginTop: 14 }}>VITE_GOOGLE_CLIENT_ID is not set — see .env.example</p>}
@@ -820,7 +820,7 @@ export default function App() {
     };
   }, [user]);
 
-  if (user === undefined) return <div style={{ minHeight: "100vh", background: "#ECFFB6" }} />;
+  if (user === undefined) return <div style={{ minHeight: "100vh", background: "#F4F5F3" }} />;
   if (!user) return <><GoogleGate onLoggedIn={(u) => { setLoggedOutReason(""); setUser(u); }} notice={loggedOutReason} /><InstallPrompt /></>;
   return <><FeeLedger user={user} onLogout={() => { api.logout().finally(() => setUser(null)); }} /><InstallPrompt /></>;
 }
@@ -900,15 +900,15 @@ function InstallPrompt() {
       {!isIOS && <button className="install-banner-btn" onClick={install}>Install</button>}
       <button className="install-banner-close" onClick={dismiss} aria-label="Dismiss"><X size={16} /></button>
       <style>{`
-        .install-banner { position: fixed; left: 12px; right: 12px; bottom: 12px; z-index: 80; display: flex; align-items: center; gap: 10px; background: #00545F; color: #ECFFB6; border: 1.5px solid #D6FB00; padding: 10px 12px; max-width: 420px; margin: 0 auto; box-shadow: 0 8px 24px rgba(0,0,0,0.25); animation: installBannerIn 0.25s cubic-bezier(0.22,1,0.36,1); }
+        .install-banner { position: fixed; left: 12px; right: 12px; bottom: 12px; z-index: 80; display: flex; align-items: center; gap: 10px; background: #134E4A; color: #F8FAFC; border: 1.5px solid #0F766E; padding: 10px 12px; max-width: 420px; margin: 0 auto; box-shadow: 0 8px 24px rgba(0,0,0,0.25); animation: installBannerIn 0.25s cubic-bezier(0.22,1,0.36,1); }
         @keyframes installBannerIn { from { transform: translateY(16px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
         .install-banner-icon { border-radius: 8px; flex-shrink: 0; }
         .install-banner-text { flex: 1; min-width: 0; }
         .install-banner-title { font-weight: 700; font-size: 13.5px; }
-        .install-banner-sub { font-size: 11.5px; color: rgba(236,255,182,0.65); margin-top: 1px; }
-        .install-banner-btn { background: #D6FB00; color: #00545F; border: none; font-weight: 700; font-size: 12.5px; padding: 7px 12px; cursor: pointer; flex-shrink: 0; }
-        .install-banner-close { background: none; border: none; color: rgba(236,255,182,0.6); cursor: pointer; padding: 4px; flex-shrink: 0; display: flex; }
-        .install-banner-close:hover { color: #ECFFB6; }
+        .install-banner-sub { font-size: 11.5px; color: rgba(248,250,252,0.65); margin-top: 1px; }
+        .install-banner-btn { background: #FFFFFF; color: #134E4A; border: none; font-weight: 700; font-size: 12.5px; padding: 7px 12px; cursor: pointer; flex-shrink: 0; }
+        .install-banner-close { background: none; border: none; color: rgba(248,250,252,0.6); cursor: pointer; padding: 4px; flex-shrink: 0; display: flex; }
+        .install-banner-close:hover { color: #FFFFFF; }
       `}</style>
     </div>
   );
@@ -925,7 +925,7 @@ function FeeLedger({ user, onLogout }) {
   });
   useEffect(() => {
     localStorage.setItem("fee-ledger-theme", darkMode ? "dark" : "light");
-    document.body.style.background = darkMode ? "#00232A" : "#ECFFB6";
+    document.body.style.background = darkMode ? "#111827" : "#F4F5F3";
   }, [darkMode]);
   const [students, setStudents] = useState([]);
   const [reminders, setReminders] = useState([]);
@@ -1854,7 +1854,7 @@ function FeeLedger({ user, onLogout }) {
     }
   }
 
-  if (!loaded) return <div style={{ minHeight: "100vh", background: "#ECFFB6" }} />;
+  if (!loaded) return <div style={{ minHeight: "100vh", background: "#F4F5F3" }} />;
 
   return (
     <div className={`wrap${darkMode ? " dark" : ""}`}>
@@ -1865,33 +1865,38 @@ function FeeLedger({ user, onLogout }) {
           --sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
           --display: 'Space Grotesk', var(--sans);
           --mono: 'IBM Plex Mono', ui-monospace, -apple-system, 'SF Mono', Menlo, monospace;
-          --bg: #ECFFB6; --card: #F9FFE6; --card-alt: #F2FBD1;
-          --ink: #00545F; --text-soft: #3D7580; --text-mute: #6B98A0;
-          --line: #00545F; --line-soft: #D9EFAF;
-          --surface-hover: #F2FBD1; --row-hover: #F8FFEA;
-          --menu-bg: #F9FFE6; --stat-bg: #F9FFE6;
-          --accent: #00545F; --accent-dark: #013640; --accent-hover: #013640; --accent-tint: rgba(0,84,95,0.1);
-          --highlight: #D6FB00; --highlight-ink: #00343D; --highlight-tint: rgba(214,251,0,0.22);
-          --paid: #00545F; --paid-bg: rgba(214,251,0,0.28);
-          --due: #B8590A; --due-bg: rgba(184,89,10,0.1);
-          --over: #C4102A; --over-bg: rgba(196,16,42,0.09);
-          --whatsapp: #4C9A2A; --whatsapp-hover: #3E7F21;
-          --header-fg: #ECFFB6; --header-fg-mute: rgba(236,255,182,0.55);
-          --overlay: rgba(0,84,95,0.45);
+          /* Ledger Clean, light: soft grey-green page, white cards, near-black
+             text, teal only for brand and actions, colour only for state. */
+          --bg: #F4F5F3; --card: #FFFFFF; --card-alt: #EEF2F1;
+          --ink: #111827; --text-soft: #374151; --text-mute: #6B7280;
+          --line: #D1D5DB; --line-soft: #E5E7EB;
+          --surface-hover: #F3F4F6; --row-hover: #F9FAFB;
+          --menu-bg: #FFFFFF; --stat-bg: #FFFFFF;
+          --accent: #0F766E; --accent-dark: #115E59; --accent-hover: #115E59; --accent-tint: rgba(15,118,110,0.1);
+          --highlight: #0F766E; --highlight-ink: #FFFFFF; --highlight-tint: rgba(15,118,110,0.12);
+          --paid: #059669; --paid-bg: rgba(5,150,105,0.12);
+          --due: #D97706; --due-bg: rgba(217,119,6,0.1);
+          --over: #DC2626; --over-bg: rgba(220,38,38,0.08);
+          --whatsapp: #0F766E; --whatsapp-hover: #115E59; --whatsapp-ink: #FFFFFF;
+          --header-fg: #F8FAFC; --header-fg-mute: rgba(248,250,252,0.65);
+          --overlay: rgba(17,24,39,0.45);
         }
         .wrap.dark {
           color-scheme: dark;
-          --bg: #00232A; --card: #013640; --card-alt: #01424E;
-          --ink: #ECFFB6; --text-soft: #B9D98F; --text-mute: #7FA05C;
-          --line: #ECFFB6; --line-soft: #123A42;
-          --surface-hover: #01424E; --row-hover: #012C34;
-          --menu-bg: #013640; --stat-bg: #013640;
-          --accent: #D6FB00; --accent-dark: #B8D900; --accent-hover: #C2E600; --accent-tint: rgba(214,251,0,0.2);
-          --highlight: #D6FB00; --highlight-ink: #1B2400; --highlight-tint: rgba(214,251,0,0.16);
-          --paid: #D6FB00; --paid-bg: rgba(214,251,0,0.14);
-          --due: #FF9F0A; --due-bg: rgba(255,159,10,0.14);
-          --over: #FF5C48; --over-bg: rgba(255,92,72,0.14);
-          --overlay: rgba(0,35,42,0.7);
+          /* Ledger Clean, dark: dark slate page and cards, pale text, state
+             colours lifted so they stay readable on dark cards. */
+          --bg: #111827; --card: #1F2937; --card-alt: #2A3444;
+          --ink: #F9FAFB; --text-soft: #D1D5DB; --text-mute: #9CA3AF;
+          --line: #374151; --line-soft: #374151;
+          --surface-hover: #374151; --row-hover: #2A3444;
+          --menu-bg: #1F2937; --stat-bg: #1F2937;
+          --accent: #2DD4BF; --accent-dark: #5EEAD4; --accent-hover: #5EEAD4; --accent-tint: rgba(45,212,191,0.15);
+          --highlight: #2DD4BF; --highlight-ink: #111827; --highlight-tint: rgba(45,212,191,0.15);
+          --paid: #34D399; --paid-bg: rgba(52,211,153,0.15);
+          --due: #FBBF24; --due-bg: rgba(251,191,36,0.12);
+          --over: #F87171; --over-bg: rgba(248,113,113,0.12);
+          --whatsapp: #2DD4BF; --whatsapp-hover: #5EEAD4; --whatsapp-ink: #111827;
+          --overlay: rgba(0,0,0,0.6);
         }
         @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
 
@@ -1899,8 +1904,8 @@ function FeeLedger({ user, onLogout }) {
            on its own layer, so it never competes with text — the solid cards
            below cover it wherever content actually sits. Dark mode gets a
            lighter, fainter grid so the pattern stays subtle there too. */
-        .wrap { min-height: 100vh; background-color: var(--bg); background-image: linear-gradient(rgba(0,84,95,0.07) 1px, transparent 1px), linear-gradient(90deg, rgba(0,84,95,0.07) 1px, transparent 1px); background-size: 24px 24px; font-family: var(--sans); color: var(--ink); padding-bottom: 60px; -webkit-font-smoothing: antialiased; }
-        .wrap.dark { background-image: linear-gradient(rgba(236,255,182,0.06) 1px, transparent 1px), linear-gradient(90deg, rgba(236,255,182,0.06) 1px, transparent 1px); }
+        .wrap { min-height: 100vh; background-color: var(--bg); background-image: linear-gradient(rgba(15,118,110,0.06) 1px, transparent 1px), linear-gradient(90deg, rgba(15,118,110,0.06) 1px, transparent 1px); background-size: 24px 24px; font-family: var(--sans); color: var(--ink); padding-bottom: 60px; -webkit-font-smoothing: antialiased; }
+        .wrap.dark { background-image: linear-gradient(rgba(45,212,191,0.07) 1px, transparent 1px), linear-gradient(90deg, rgba(45,212,191,0.07) 1px, transparent 1px); }
         h1,h2,h3 { font-family: var(--display); }
         .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
         a { color: inherit; }
@@ -1908,28 +1913,28 @@ function FeeLedger({ user, onLogout }) {
         /* The masthead: a constant black bar in both themes (like a printed ledger's
            header row), with a single lime rule underneath. It doesn't shift with
            light/dark mode — it's the one fixed anchor of the brand. */
-        .header { background: #00545F; border-bottom: 3px solid var(--highlight); color: var(--header-fg); padding: 20px 24px 18px; position: relative; }
+        .header { background: #134E4A; border-bottom: 3px solid var(--highlight); color: var(--header-fg); padding: 20px 24px 18px; position: relative; }
         .header-top { display:flex; align-items:center; justify-content:space-between; gap: 12px; flex-wrap: wrap; }
         .brand { display:flex; align-items:center; gap:10px; }
-        .brand-mark { width: 34px; height: 34px; border-radius: 4px; background: var(--highlight); color: #00545F; display:flex; align-items:center; justify-content:center; font-family: var(--display); font-weight:700; font-size: 13px; letter-spacing: -0.2px; }
+        .brand-mark { width: 34px; height: 34px; border-radius: 4px; background: var(--highlight); color: var(--highlight-ink); display:flex; align-items:center; justify-content:center; font-family: var(--display); font-weight:700; font-size: 13px; letter-spacing: -0.2px; }
         .brand-title { font-family: var(--display); font-size: 19px; font-weight:700; letter-spacing: -0.2px; color: var(--header-fg); }
-        .brand-sub { font-family: var(--mono); font-size: 11px; color: rgba(236,255,182,0.5); letter-spacing: 0.2px; margin-top: 2px; }
+        .brand-sub { font-family: var(--mono); font-size: 11px; color: rgba(248,250,252,0.5); letter-spacing: 0.2px; margin-top: 2px; }
 
-        .user-chip { display:flex; align-items:center; gap:8px; background: rgba(236,255,182,0.08); border:1px solid rgba(236,255,182,0.18); padding: 4px 10px 4px 5px; border-radius: 999px; transition: background 0.15s ease; color: var(--header-fg); }
-        .user-chip:hover { background: rgba(236,255,182,0.16); }
+        .user-chip { display:flex; align-items:center; gap:8px; background: rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.18); padding: 4px 10px 4px 5px; border-radius: 999px; transition: background 0.15s ease; color: var(--header-fg); }
+        .user-chip:hover { background: rgba(255,255,255,0.16); }
         .user-chip img { width:22px; height:22px; border-radius:50%; display:block; }
-        .icon-plain { background:none; border:none; color: rgba(236,255,182,0.7); cursor:pointer; display:flex; padding: 4px; border-radius: 6px; transition: color 0.15s ease; }
+        .icon-plain { background:none; border:none; color: rgba(248,250,252,0.7); cursor:pointer; display:flex; padding: 4px; border-radius: 6px; transition: color 0.15s ease; }
         .icon-plain:hover { color: var(--header-fg); }
-        .theme-toggle { background: rgba(236,255,182,0.08); border: 1px solid rgba(236,255,182,0.18); width: 30px; height: 30px; border-radius: 50%; align-items: center; justify-content: center; padding: 0; }
-        .theme-toggle:hover { background: rgba(236,255,182,0.16); color: var(--header-fg); }
+        .theme-toggle { background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.18); width: 30px; height: 30px; border-radius: 50%; align-items: center; justify-content: center; padding: 0; }
+        .theme-toggle:hover { background: rgba(255,255,255,0.16); color: var(--header-fg); }
 
-        .select-field { background: rgba(236,255,182,0.08); border: 1px solid rgba(236,255,182,0.22); color: var(--header-fg); padding: 7px 28px 7px 12px; border-radius: 7px; font-size: 13px; font-weight: 500; appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23ECFFB6' stroke-width='1.4' fill='none'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 11px center; cursor: pointer; transition: background 0.15s ease; }
-        .select-field:hover { background: rgba(236,255,182,0.16); }
+        .select-field { background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.22); color: var(--header-fg); padding: 7px 28px 7px 12px; border-radius: 7px; font-size: 13px; font-weight: 500; appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23F8FAFC' stroke-width='1.4' fill='none'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 11px center; cursor: pointer; transition: background 0.15s ease; }
+        .select-field:hover { background: rgba(255,255,255,0.16); }
         .select-field.light { background-color: var(--card-alt); border: 1px solid var(--line-soft); color: var(--ink); background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23514E45' stroke-width='1.4' fill='none'/%3E%3C/svg%3E"); }
         .dropdown-wrap { position: relative; }
-        .dropdown-trigger { display:flex; align-items:center; gap: 7px; background: rgba(236,255,182,0.08); border: 1px solid rgba(236,255,182,0.22); color: var(--header-fg); padding: 7px 12px; border-radius: 7px; font-size: 13px; font-weight: 500; cursor: pointer; transition: background 0.15s ease; }
-        .dropdown-trigger:hover { background: rgba(236,255,182,0.16); }
-        .dropdown-menu { position: absolute; top: calc(100% + 6px); left: 0; min-width: 220px; max-width: calc(100vw - 32px); background: var(--menu-bg); border: 1.5px solid var(--ink); border-radius: 6px; box-shadow: 3px 3px 0 var(--ink); padding: 5px; z-index: 40; animation: dropIn 0.14s ease; color: var(--ink); }
+        .dropdown-trigger { display:flex; align-items:center; gap: 7px; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.22); color: var(--header-fg); padding: 7px 12px; border-radius: 7px; font-size: 13px; font-weight: 500; cursor: pointer; transition: background 0.15s ease; }
+        .dropdown-trigger:hover { background: rgba(255,255,255,0.16); }
+        .dropdown-menu { position: absolute; top: calc(100% + 6px); left: 0; min-width: 220px; max-width: calc(100vw - 32px); background: var(--menu-bg); border: 1px solid var(--line-soft); border-radius: 6px; box-shadow: 0 8px 24px rgba(0,0,0,0.12); padding: 5px; z-index: 40; animation: dropIn 0.14s ease; color: var(--ink); }
         @keyframes dropIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
         .dropdown-item { display:flex; align-items:center; justify-content:space-between; gap: 8px; width: 100%; text-align:left; background: none; border: none; padding: 8px 10px; border-radius: 4px; font-size: 13.5px; color: var(--ink); cursor: pointer; transition: background 0.1s ease; }
         .dropdown-item:hover { background: var(--card-alt); }
@@ -1940,10 +1945,10 @@ function FeeLedger({ user, onLogout }) {
            flat lime fill (no gradient) on a translucent black track, mono percentage.
            This is the one place the page allows itself to feel bold. */
         .meter-row { display:flex; align-items:baseline; gap: 14px; margin-top: 22px; }
-        .meter-track { flex:1; height: 10px; background: rgba(236,255,182,0.14); overflow:hidden; position: relative; align-self: center; }
-        .meter-fill { height: 100%; background: var(--highlight); transition: width 0.6s cubic-bezier(0.22,1,0.36,1); }
+        .meter-track { flex:1; height: 10px; background: rgba(255,255,255,0.14); overflow:hidden; position: relative; align-self: center; }
+        .meter-fill { height: 100%; background: #2DD4BF; transition: width 0.6s cubic-bezier(0.22,1,0.36,1); }
         .meter-label { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--header-fg-mute); white-space: nowrap; }
-        .meter-pct { font-family: var(--mono); font-size: 19px; font-weight: 700; color: var(--highlight); white-space: nowrap; letter-spacing: -0.3px; }
+        .meter-pct { font-family: var(--mono); font-size: 19px; font-weight: 700; color: #5EEAD4; white-space: nowrap; letter-spacing: -0.3px; }
 
         /* Bento grid: 12 columns, one consistent 16px gap, tile size by
            priority, not by content volume. The hero tile (balance due) spans
@@ -1952,8 +1957,8 @@ function FeeLedger({ user, onLogout }) {
            DOM order matches visual order, so screen readers and keyboards
            follow the same top-left-first reading as sighted users. */
         .stats-row { display: grid; grid-template-columns: repeat(12, 1fr); gap: 16px; margin-top: 16px; }
-        .stat-card { position:relative; grid-column: span 3; background: var(--stat-bg); padding: 16px; border: 1.5px solid var(--ink); border-radius: 16px; box-shadow: 0 2px 8px rgba(0,84,95,0.05); transition: transform 0.15s ease, box-shadow 0.15s ease; }
-        .stat-card:hover { transform: translateY(-2px); box-shadow: 0 8px 20px rgba(0,84,95,0.10); }
+        .stat-card { position:relative; grid-column: span 3; background: var(--stat-bg); padding: 16px; border: 1px solid var(--line-soft); border-radius: 16px; box-shadow: 0 2px 8px rgba(17,24,39,0.05); transition: transform 0.15s ease, box-shadow 0.15s ease; }
+        .stat-card:hover { transform: translateY(-2px); box-shadow: 0 8px 20px rgba(17,24,39,0.10); }
         .stat-card.span-4 { grid-column: span 4; }
         .stat-card.span-6 { grid-column: span 6; }
         .stat-card.span-8 { grid-column: span 8; }
@@ -1972,10 +1977,10 @@ function FeeLedger({ user, onLogout }) {
         .overview .stat-value { font-family: var(--display); font-size: 28px; letter-spacing: -0.5px; }
         /* Hero keeps the header's fixed teal, not the theme ink, so it stays
            readable in dark mode too (dark-mode ink is pale lime). */
-        .overview .stat-card.hero { grid-column: span 8; background: #00545F; color: #ECFFB6; border-color: #00545F; }
-        .overview .stat-card.hero .stat-label { color: rgba(236,255,182,0.55); }
-        .overview .stat-card.hero .stat-value { font-size: 40px; color: #D6FB00; }
-        .overview .stat-card.hero .tile-sub { color: rgba(236,255,182,0.55); }
+        .overview .stat-card.hero { grid-column: span 8; background: #134E4A; color: #F8FAFC; border-color: #134E4A; }
+        .overview .stat-card.hero .stat-label { color: rgba(248,250,252,0.65); }
+        .overview .stat-card.hero .stat-value { font-size: 40px; color: #FFFFFF; }
+        .overview .stat-card.hero .tile-sub { color: rgba(248,250,252,0.65); }
         .overview .stat-card.kpi { grid-column: span 4; }
         .overview .stat-card.chart { grid-column: span 8; }
         .overview .stat-card.action { grid-column: span 4; display:flex; flex-direction:column; }
@@ -1992,7 +1997,7 @@ function FeeLedger({ user, onLogout }) {
         .digest-text strong { color: var(--over); }
 
         .toolbar { max-width: 1080px; margin: 18px auto 0; padding: 0 20px; }
-        .toolbar-card { background: var(--card); border: 1.5px solid var(--ink); border-radius: 12px; padding: 10px; display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+        .toolbar-card { background: var(--card); border: 1px solid var(--line-soft); border-radius: 12px; padding: 10px; display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
         .search-box { display:flex; align-items:center; gap:8px; flex:1; min-width: 170px; border:1.5px solid var(--line-soft); padding:8px 12px; background: var(--bg); transition: border-color 0.15s ease, background 0.15s ease; }
         .search-box:focus-within { border-color: var(--accent); background: var(--card); }
         .search-box input { border:none; outline:none; background:transparent; font-size: 14px; width:100%; color: var(--ink); font-family: var(--sans); }
@@ -2002,24 +2007,24 @@ function FeeLedger({ user, onLogout }) {
         /* Status filter — flat segmented strip, active tab underlined rather than a soft pill */
         .segmented { display:flex; background: var(--bg); border: 1.5px solid var(--line-soft); padding: 2px; gap: 2px; }
         .segmented button { border:none; background:transparent; padding: 7px 11px; font-size: 12.5px; font-weight: 600; color: var(--text-soft); cursor: pointer; transition: background 0.15s ease, color 0.15s ease; white-space: nowrap; font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.3px; }
-        .segmented button.active { background: var(--ink); color: var(--bg); }
-        .view-tabs { margin-top: 18px; display: inline-flex; background: rgba(236,255,182,0.08); border-color: rgba(236,255,182,0.22); }
-        .view-tabs button { color: rgba(236,255,182,0.6); }
-        .view-tabs button.active { background: var(--highlight); color: #00545F; }
+        .segmented button.active { background: var(--highlight); color: var(--highlight-ink); }
+        .view-tabs { margin-top: 18px; display: inline-flex; background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.22); }
+        .view-tabs button { color: rgba(248,250,252,0.6); }
+        .view-tabs button.active { background: var(--highlight); color: var(--highlight-ink); }
 
         .btn { border:none; border-radius:3px; padding:8px 14px; font-size:13.5px; font-weight:700; display:flex; align-items:center; gap:6px; cursor:pointer; white-space:nowrap; transition: opacity 0.12s ease, background 0.15s ease; font-family: var(--sans); }
         .btn:active { opacity: 0.75; }
         .btn-primary { background: var(--accent); color: var(--bg); }
         .btn-primary:hover { background: var(--accent-hover); }
-        .btn-whatsapp { background: var(--whatsapp); color: var(--header-fg); }
+        .btn-whatsapp { background: var(--whatsapp); color: var(--whatsapp-ink); }
         .btn-whatsapp:hover { background: var(--whatsapp-hover); }
-        .btn-ghost { background: var(--card); color: var(--ink); border:1.5px solid var(--ink); }
+        .btn-ghost { background: var(--card); color: var(--ink); border:1px solid var(--line-soft); }
         .btn-ghost:hover { background: var(--surface-hover); }
 
         .content { max-width: 1080px; margin: 20px auto 0; padding: 0 20px; }
-        .section-label { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--bg); background: var(--ink); margin: 18px 0 0; padding: 7px 14px; display:flex; justify-content: space-between; align-items:center; font-weight: 600; }
+        .section-label { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--highlight-ink); background: var(--highlight); margin: 18px 0 0; padding: 7px 14px; display:flex; justify-content: space-between; align-items:center; font-weight: 600; }
 
-        .ledger { background: var(--card); border:1.5px solid var(--ink); border-top: none; }
+        .ledger { background: var(--card); border:1px solid var(--line-soft); border-top: none; }
         .row { display:grid; grid-template-columns: 20px 34px 1fr auto; gap: 12px; align-items:center; padding: 13px 16px; border-bottom: 1px solid var(--line-soft); transition: background 0.1s ease; }
         .row:last-child { border-bottom: none; }
         .row:hover { background: var(--row-hover); }
@@ -2051,9 +2056,9 @@ function FeeLedger({ user, onLogout }) {
         @media (min-width:720px) { .modal-backdrop { align-items:center; } }
         @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
         @keyframes slideUp { from { transform: translateY(16px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
-        .modal { background: var(--card); width:100%; max-width:480px; padding:20px; max-height:88vh; overflow:auto; animation: slideUp 0.22s cubic-bezier(0.22,1,0.36,1); border: 1.5px solid var(--ink); border-bottom: none; }
-        @media (min-width:720px) { .modal { border-bottom: 1.5px solid var(--ink); } }
-        .modal-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; padding-bottom: 12px; border-bottom: 1.5px solid var(--ink); }
+        .modal { background: var(--card); width:100%; max-width:480px; padding:20px; max-height:88vh; overflow:auto; animation: slideUp 0.22s cubic-bezier(0.22,1,0.36,1); border: 1px solid var(--line-soft); border-bottom: none; }
+        @media (min-width:720px) { .modal { border-bottom: 1px solid var(--line-soft); } }
+        .modal-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; padding-bottom: 12px; border-bottom: 1px solid var(--line-soft); }
         .modal-title { font-family: var(--display); font-size:18px; font-weight:700; color: var(--ink); letter-spacing: -0.2px; }
         .field { margin-bottom: 12px; }
         .field label { font-family: var(--mono); font-size:10.5px; font-weight:600; text-transform: uppercase; letter-spacing: 0.4px; color:var(--text-mute); display:block; margin-bottom:6px; }
@@ -2091,11 +2096,11 @@ function FeeLedger({ user, onLogout }) {
         .reminder-item label { display:flex; align-items:flex-start; gap:10px; cursor:pointer; }
         .reminder-msg { font-family: var(--mono); font-size:12px; color:var(--text-soft); margin-top:6px; line-height:1.5; background: var(--card-alt); padding:8px; }
 
-        .toast { position:fixed; bottom:18px; left:50%; transform:translateX(-50%); background: #00545F; color: var(--header-fg); padding:11px 18px; border: 1.5px solid var(--highlight); font-size:13.5px; display:flex; align-items:center; gap:8px; z-index:60; animation: toastIn 0.2s cubic-bezier(0.22,1,0.36,1); }
+        .toast { position:fixed; bottom:18px; left:50%; transform:translateX(-50%); background: #134E4A; color: var(--header-fg); padding:11px 18px; border: 1.5px solid var(--highlight); font-size:13.5px; display:flex; align-items:center; gap:8px; z-index:60; animation: toastIn 0.2s cubic-bezier(0.22,1,0.36,1); }
         @keyframes toastIn { from { transform: translate(-50%, 10px); opacity: 0; } to { transform: translate(-50%, 0); opacity: 1; } }
-        .toast.warn { background: #00545F; border-color: var(--due); }
-        .toast-action { background: rgba(236,255,182,0.16); border:1px solid rgba(236,255,182,0.3); color: var(--header-fg); font-weight:600; font-size:12.5px; padding:5px 10px; cursor:pointer; margin-left: 4px; }
-        .toast-action:hover { background: rgba(236,255,182,0.26); }
+        .toast.warn { background: #134E4A; border-color: var(--due); }
+        .toast-action { background: rgba(255,255,255,0.16); border:1px solid rgba(255,255,255,0.3); color: var(--header-fg); font-weight:600; font-size:12.5px; padding:5px 10px; cursor:pointer; margin-left: 4px; }
+        .toast-action:hover { background: rgba(255,255,255,0.26); }
 
         .history-item { padding:12px 14px; border-bottom:1px solid var(--line-soft); }
         .history-item:last-child { border-bottom:none; }
@@ -3071,7 +3076,7 @@ function FeeLedger({ user, onLogout }) {
                   <div style={{ flex: 1 }}>
                     <div style={{ display: "flex", justifyContent: "space-between" }}>
                       <div style={{ fontWeight: 600, fontSize: 13.5 }}>{s.name} <span style={{ color: "var(--text-mute)", fontWeight: 400 }}>· {s.phone || "no number"}</span></div>
-                      {s.phone && <a href={waLink(s.phone, defaultTemplate(s))} target="_blank" rel="noreferrer" onClick={(e) => { e.stopPropagation(); logSingleReminder(s); }} className="icon-btn" style={{ background: "var(--whatsapp)", color: "var(--header-fg)" }}><MessageCircle size={13} /></a>}
+                      {s.phone && <a href={waLink(s.phone, defaultTemplate(s))} target="_blank" rel="noreferrer" onClick={(e) => { e.stopPropagation(); logSingleReminder(s); }} className="icon-btn" style={{ background: "var(--whatsapp)", color: "var(--whatsapp-ink)" }}><MessageCircle size={13} /></a>}
                     </div>
                     <div className="reminder-msg">{defaultTemplate(s)}</div>
                   </div>
