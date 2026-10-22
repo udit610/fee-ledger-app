@@ -320,6 +320,7 @@ function accruedInstallmentBalance(student, today = todayISO()) {
 // across everything" — tuition (accrued-to-date for installment plans, full
 // balance for full-plan students), transport, Annual Fee, and any carried-over
 // previous-session due, net of whatever's already been paid against each.
+// Kept for stats/exports, where "accrued" is the right meaning.
 function computeTotalPending(student) {
   const tuitionPending = isInstallmentPlan(student) && (student.installments || []).length
     ? accruedInstallmentBalance(student)
@@ -328,6 +329,23 @@ function computeTotalPending(student) {
   const annualFeePending = annualFeeComputed(student).balance;
   const previousPending = student.previousSessionDue || 0;
   return tuitionPending + transportPending + annualFeePending + previousPending;
+}
+
+// What WhatsApp reminders must quote: the ENTIRE fee still due, not just the
+// overdue/accrued part. For an installment-plan student this is the key
+// difference — withComputed() already derives total/paid from the whole
+// installments array, so total - paid is every remaining installment,
+// including ones not due yet, not just the ones due up to today. Transport,
+// Annual Fee, and previous-session dues are added in full on top of that.
+// Each component is floored at 0 so an overpayment on one charge can't
+// quietly shrink what another charge still owes.
+function computeEntireFeeDue(student) {
+  const s = withComputed(student);
+  const tuitionDue = Math.max(0, s.total - s.paid);
+  const transportDue = s.transportRate > 0 ? Math.max(0, transportComputed(s).balance) : 0;
+  const annualFeeDue = annualFeeComputed(s).balance;
+  const previousDue = Math.max(0, s.previousSessionDue || 0);
+  return tuitionDue + transportDue + annualFeeDue + previousDue;
 }
 
 // Builds a "collected per month" series for the last `months` months from every
@@ -400,12 +418,14 @@ function StampBadge({ status }) {
   );
 }
 
-// Reminder now states the parent's CUMULATIVE outstanding balance as of today —
-// every overdue/current installment, transport, Annual Fee, and any previous-session
-// due, all rolled into one figure — instead of just the single next-due period.
+// Reminder states the parent's ENTIRE outstanding fee — every remaining
+// installment (including ones not due yet), transport, Annual Fee, and any
+// previous-session due, all rolled into one figure — instead of just the
+// overdue/accrued part. "Up to date" wording was dropped with it: this figure
+// deliberately goes beyond what is due today.
 function defaultTemplate(student) {
-  const totalPending = computeTotalPending(student);
-  return `Dear Parent, this is a reminder from ${student.school} that the total pending fee for ${student.name} (${student.cls}) up to date is ${money(totalPending)}. Kindly pay at the earliest. Thank you.`;
+  const totalDue = computeEntireFeeDue(student);
+  return `Dear Parent, this is a reminder from ${student.school} that the total fee due for ${student.name} (${student.cls}) is ${money(totalDue)}. Kindly pay at the earliest. Thank you.`;
 }
 
 function initials(name) {
@@ -1035,7 +1055,9 @@ function FeeLedger({ user, onLogout }) {
     const today = todayISO(); // hoisted: was recomputed for every student
     return students.map((raw) => {
       const s = withComputed(raw);
-      return { ...s, status: statusOf(s, today), balance: s.total - s.paid, daysOverdue: -daysBetween(s.due, today) };
+      // Precomputed once here so the search filter and every rendered row
+      // don't redo the same string normalisation on every keystroke/render.
+      return { ...s, status: statusOf(s, today), balance: s.total - s.paid, daysOverdue: -daysBetween(s.due, today), nameKey: normName(raw.name), nameLower: String(raw.name || "").toLowerCase() };
     });
   }, [students]);
 
@@ -1060,7 +1082,7 @@ function FeeLedger({ user, onLogout }) {
       (s) =>
         (!transportOnly || s.transportRate > 0) &&
         (statusFilter === "all" || s.status === statusFilter) &&
-        (!q || s.name.toLowerCase().includes(q))
+        (!q || s.nameLower.includes(q))
     );
     if (sortBy === "name") list.sort((a, b) => a.name.localeCompare(b.name));
     else if (sortBy === "balance") list.sort((a, b) => b.balance - a.balance);
@@ -1122,7 +1144,8 @@ function FeeLedger({ user, onLogout }) {
 
   const digest = useMemo(() => {
     const pool = filtered; // already scoped to schoolFilter/status/search
-    const dueSoon = pool.filter((s) => s.status === "pending" && daysBetween(s.due, todayISO()) <= 3);
+    const today = todayISO(); // hoisted: was recomputed for every student
+    const dueSoon = pool.filter((s) => s.status === "pending" && daysBetween(s.due, today) <= 3);
     const overdue = pool.filter((s) => s.status === "overdue");
     const needsReminderList = pool.filter((s) => needsReminder(s, reminders));
     return { dueSoon, overdue, needsReminderList };
@@ -1322,6 +1345,10 @@ function FeeLedger({ user, onLogout }) {
     return collectionSeries(pool, 6);
   }, [students, schoolFilter]);
 
+  // Hoisted out of the bar-chart render below, where it was recomputed for
+  // every single bar (a fresh .map over the series each time).
+  const monthlySeriesMax = useMemo(() => Math.max(1, ...monthlySeries.map((x) => x.amount)), [monthlySeries]);
+
   const classBreakdown = useMemo(() => {
     // Reuses `decorated` rather than running withComputed over every student again.
     const groups = new Map();
@@ -1350,7 +1377,8 @@ function FeeLedger({ user, onLogout }) {
   }
 
   async function logSingleReminder(s) {
-    const entry = { studentId: s.id, name: s.name, school: s.school, phone: s.phone, balance: computeTotalPending(s), message: defaultTemplate(s) };
+    // Balance logged here must match the figure in the WhatsApp message itself.
+    const entry = { studentId: s.id, name: s.name, school: s.school, phone: s.phone, balance: computeEntireFeeDue(s), message: defaultTemplate(s) };
     try {
       const saved = await api.logReminder(entry);
       setReminders((r) => [saved, ...r]);
@@ -1861,7 +1889,12 @@ function FeeLedger({ user, onLogout }) {
         }
         @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
 
-        .wrap { min-height: 100vh; background: var(--bg); font-family: var(--sans); color: var(--ink); padding-bottom: 60px; -webkit-font-smoothing: antialiased; }
+        /* Grid-pattern layout: a faint 24px hairline grid sits behind the page
+           on its own layer, so it never competes with text — the solid cards
+           below cover it wherever content actually sits. Dark mode gets a
+           lighter, fainter grid so the pattern stays subtle there too. */
+        .wrap { min-height: 100vh; background-color: var(--bg); background-image: linear-gradient(rgba(0,84,95,0.07) 1px, transparent 1px), linear-gradient(90deg, rgba(0,84,95,0.07) 1px, transparent 1px); background-size: 24px 24px; font-family: var(--sans); color: var(--ink); padding-bottom: 60px; -webkit-font-smoothing: antialiased; }
+        .wrap.dark { background-image: linear-gradient(rgba(236,255,182,0.06) 1px, transparent 1px), linear-gradient(90deg, rgba(236,255,182,0.06) 1px, transparent 1px); }
         h1,h2,h3 { font-family: var(--display); }
         .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
         a { color: inherit; }
@@ -1906,23 +1939,32 @@ function FeeLedger({ user, onLogout }) {
         .meter-label { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--header-fg-mute); white-space: nowrap; }
         .meter-pct { font-family: var(--mono); font-size: 19px; font-weight: 700; color: var(--highlight); white-space: nowrap; letter-spacing: -0.3px; }
 
-        .stats-row { display: grid; grid-template-columns: repeat(2, 1fr); border: 1.5px solid var(--ink); border-top: none; margin-top: 16px; }
-        @media (min-width: 720px) { .stats-row { grid-template-columns: repeat(4, 1fr); } }
-        .stat-card { position:relative; background: var(--stat-bg); padding: 13px 16px; border-right: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft); }
-        .stat-card:nth-child(2n) { border-right: none; }
-        @media (min-width: 720px) { .stat-card:nth-child(2n) { border-right: 1px solid var(--line-soft); } .stat-card:last-child { border-right: none; } .stat-card { border-bottom: none; } }
-        .stat-card.wide { grid-column: 1 / -1; display:flex; align-items:baseline; justify-content:space-between; gap: 10px; }
+        /* Bento grid: 12 columns, one consistent 16px gap, tile size by
+           priority, not by content volume. The hero tile (balance due) spans
+           6 columns, ordinary metrics span 3, and the wide tile spans 8, so
+           the grid reads as a hierarchy instead of a strip of equal boxes.
+           DOM order matches visual order, so screen readers and keyboards
+           follow the same top-left-first reading as sighted users. */
+        .stats-row { display: grid; grid-template-columns: repeat(12, 1fr); gap: 16px; margin-top: 16px; }
+        .stat-card { position:relative; grid-column: span 3; background: var(--stat-bg); padding: 16px; border: 1.5px solid var(--ink); border-radius: 16px; box-shadow: 0 2px 8px rgba(0,84,95,0.05); transition: transform 0.15s ease, box-shadow 0.15s ease; }
+        .stat-card:hover { transform: translateY(-2px); box-shadow: 0 8px 20px rgba(0,84,95,0.10); }
+        .stat-card.span-4 { grid-column: span 4; }
+        .stat-card.span-6 { grid-column: span 6; }
+        .stat-card.span-8 { grid-column: span 8; }
+        .stat-card.span-12 { grid-column: span 12; }
+        .stat-card.hero .stat-value { font-size: 28px; }
+        .stat-card.wide { grid-column: span 8; display:flex; align-items:baseline; justify-content:space-between; gap: 10px; }
         .stat-card.wide .stat-label { margin-bottom: 0; }
         .stat-label { font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-mute); margin-bottom: 6px; font-weight: 500; }
         .stat-value { font-family: var(--mono); font-size: 19px; font-weight: 700; color: var(--ink); letter-spacing: -0.3px; }
         .stat-value.amber { color: var(--due); } .stat-value.red { color: var(--over); }
 
-        .note-banner { background: var(--card); border:1.5px solid var(--line-soft); border-left: 4px solid var(--accent); color: var(--text-soft); font-size:12.5px; line-height: 1.5; padding:10px 14px; margin: 14px 20px 0; max-width:1040px; margin-left:auto; margin-right:auto; }
-        .digest-banner { display:flex; align-items:center; justify-content:space-between; gap: 12px; flex-wrap:wrap; background: var(--card); border:1.5px solid var(--line-soft); border-left: 4px solid var(--over); color: var(--text-soft); font-size:12.5px; line-height: 1.5; padding:10px 14px; margin: 10px 20px 0; max-width:1040px; margin-left:auto; margin-right:auto; }
+        .note-banner { background: var(--card); border:1.5px solid var(--line-soft); border-left: 4px solid var(--accent); border-radius: 12px; color: var(--text-soft); font-size:12.5px; line-height: 1.5; padding:10px 14px; margin: 14px 20px 0; max-width:1040px; margin-left:auto; margin-right:auto; }
+        .digest-banner { display:flex; align-items:center; justify-content:space-between; gap: 12px; flex-wrap:wrap; background: var(--card); border:1.5px solid var(--line-soft); border-left: 4px solid var(--over); border-radius: 12px; color: var(--text-soft); font-size:12.5px; line-height: 1.5; padding:10px 14px; margin: 10px 20px 0; max-width:1040px; margin-left:auto; margin-right:auto; }
         .digest-text strong { color: var(--over); }
 
         .toolbar { max-width: 1080px; margin: 18px auto 0; padding: 0 20px; }
-        .toolbar-card { background: var(--card); border: 1.5px solid var(--ink); padding: 10px; display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+        .toolbar-card { background: var(--card); border: 1.5px solid var(--ink); border-radius: 12px; padding: 10px; display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
         .search-box { display:flex; align-items:center; gap:8px; flex:1; min-width: 170px; border:1.5px solid var(--line-soft); padding:8px 12px; background: var(--bg); transition: border-color 0.15s ease, background 0.15s ease; }
         .search-box:focus-within { border-color: var(--accent); background: var(--card); }
         .search-box input { border:none; outline:none; background:transparent; font-size: 14px; width:100%; color: var(--ink); font-family: var(--sans); }
@@ -2056,7 +2098,12 @@ function FeeLedger({ user, onLogout }) {
           .amt-sub { display: none; }
           .toolbar-card .btn span, .toolbar-card .btn { font-size: 12.5px; padding: 8px 10px; }
           .header { padding: 18px 16px 16px; }
-          .stats-row { grid-template-columns: repeat(2, 1fr); }
+          /* Phone: same bento logic on a 6-column grid — ordinary tiles take
+             half the width, hero and wide tiles take the full width. */
+          .stats-row { grid-template-columns: repeat(6, 1fr); gap: 12px; }
+          .stat-card { grid-column: span 3; }
+          .stat-card.span-4, .stat-card.span-6, .stat-card.span-8, .stat-card.span-12, .stat-card.wide { grid-column: span 6; }
+          .stat-card.hero .stat-value { font-size: 22px; }
           .modal { padding: 16px; max-height: 92vh; }
           .field-row { grid-template-columns: 1fr; }
           .bar-chart { gap: 6px; }
@@ -2126,30 +2173,30 @@ function FeeLedger({ user, onLogout }) {
                 </div>
 
                 <div className="stats-row">
-                  <div className="stat-card"><div className="stat-label">Students</div><div className="stat-value">{stats.count}</div></div>
+                  <div className="stat-card hero span-6"><div className="stat-label">Balance due</div><div className="stat-value amber">{money(stats.totalDue)}</div></div>
                   <div className="stat-card"><div className="stat-label">Collected</div><div className="stat-value">{money(stats.collected)}</div></div>
-                  <div className="stat-card"><div className="stat-label">Balance due</div><div className="stat-value amber">{money(stats.totalDue)}</div></div>
-                  <div className="stat-card"><div className="stat-label">Overdue</div><div className="stat-value red">{money(stats.overdueAmount)} ({stats.overdue})</div></div>
-                  <div className="stat-card wide"><div className="stat-label">Collected this month</div><div className="stat-value">{money(thisMonthCollected)}</div></div>
+                  <div className="stat-card"><div className="stat-label">Students</div><div className="stat-value">{stats.count}</div></div>
+                  <div className="stat-card span-8"><div className="stat-label">Collected this month</div><div className="stat-value">{money(thisMonthCollected)}</div></div>
+                  <div className="stat-card span-4"><div className="stat-label">Overdue</div><div className="stat-value red">{money(stats.overdueAmount)} ({stats.overdue})</div></div>
                 </div>
 
                 {(stats.transportDue > 0 || stats.transportCollected > 0) && (
                   <div className="stats-row">
-                    <div className="stat-card"><div className="stat-label">Transport collected</div><div className="stat-value">{money(stats.transportCollected)}</div></div>
-                    <div className="stat-card"><div className="stat-label">Transport due</div><div className="stat-value amber">{money(stats.transportDue)}</div></div>
+                    <div className="stat-card span-6"><div className="stat-label">Transport due</div><div className="stat-value amber">{money(stats.transportDue)}</div></div>
+                    <div className="stat-card span-6"><div className="stat-label">Transport collected</div><div className="stat-value">{money(stats.transportCollected)}</div></div>
                   </div>
                 )}
 
                 {(stats.annualFeeDue > 0 || stats.annualFeeCollected > 0) && (
                   <div className="stats-row">
-                    <div className="stat-card"><div className="stat-label">Annual fee collected</div><div className="stat-value">{money(stats.annualFeeCollected)}</div></div>
-                    <div className="stat-card"><div className="stat-label">Annual fee due</div><div className="stat-value amber">{money(stats.annualFeeDue)}</div></div>
+                    <div className="stat-card span-6"><div className="stat-label">Annual fee due</div><div className="stat-value amber">{money(stats.annualFeeDue)}</div></div>
+                    <div className="stat-card span-6"><div className="stat-label">Annual fee collected</div><div className="stat-value">{money(stats.annualFeeCollected)}</div></div>
                   </div>
                 )}
 
                 {stats.previousSessionDue > 0 && (
                   <div className="stats-row">
-                    <div className="stat-card"><div className="stat-label">Previous session due</div><div className="stat-value red">{money(stats.previousSessionDue)}</div></div>
+                    <div className="stat-card span-12"><div className="stat-label">Previous session due</div><div className="stat-value red">{money(stats.previousSessionDue)}</div></div>
                   </div>
                 )}
               </>
@@ -2292,7 +2339,7 @@ function FeeLedger({ user, onLogout }) {
                       <div className="row-sub">
                         {s.cls} · {s.school} · Due {formatDate(s.due)}
                         {s.status === "overdue" && <span style={{ color: "var(--over)", fontWeight: 600 }}> · {s.daysOverdue}d overdue</span>}
-                        {duplicateNames.has(normName(s.name)) && s.fatherName && <span> · Father: {s.fatherName}</span>}
+                        {duplicateNames.has(s.nameKey) && s.fatherName && <span> · Father: {s.fatherName}</span>}
                       </div>
                       {installment && (
                         <span className="plan-chip">{planLabel(s)} · {paidCount}/{totalCount} paid</span>
@@ -2950,7 +2997,7 @@ function FeeLedger({ user, onLogout }) {
               <span style={{ color: "var(--over)" }}><strong>{money(previousSessionStudent.previousSessionDue)}</strong> still due from before the current session</span>
             </p>
             <p style={{ fontSize: 12, color: "var(--text-mute)", marginBottom: 16 }}>
-              This is tracked separately from {previousSessionStudent.name}'s current-session balance — it's never added into "Balance due" or the current-session reminders, and shows up as its own line in messages when it's outstanding.
+              This is tracked separately from {previousSessionStudent.name}'s current-session balance, but it is included in the total fee due shown in WhatsApp reminders, so parents see the full outstanding amount.
             </p>
             <div style={{ paddingTop: 12, borderTop: "1px solid var(--border)" }}>
               <PaymentForm
@@ -3015,8 +3062,7 @@ function FeeLedger({ user, onLogout }) {
             <div className="report-section-label">Collected — last 6 months</div>
             <div className="bar-chart">
               {monthlySeries.map((m) => {
-                const max = Math.max(1, ...monthlySeries.map((x) => x.amount));
-                const h = Math.round((m.amount / max) * 100);
+                const h = Math.round((m.amount / monthlySeriesMax) * 100);
                 return (
                   <div className="bar-col" key={m.key}>
                     <div className="bar-value mono">{m.amount > 0 ? money(m.amount) : ""}</div>
