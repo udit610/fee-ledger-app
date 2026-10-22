@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="10" fill="#134E4A"/>
-  <text x="32" y="38" text-anchor="middle" font-family="'Space Grotesk', 'Segoe UI', -apple-system, sans-serif" font-weight="700" font-size="24" letter-spacing="-0.5" fill="#FFFFFF">FL</text>
-  <rect x="8" y="50" width="48" height="5" rx="2.5" fill="#0F766E"/>
+  <rect width="64" height="64" rx="12" fill="#134E4A"/>
+  <text x="32" y="42" text-anchor="middle" font-family="'Noto Sans', 'Segoe UI', -apple-system, sans-serif" font-weight="700" font-size="38" fill="#FFFFFF">₹</text>
+  <rect x="16" y="50" width="32" height="4" rx="2" fill="#2DD4BF"/>
 </svg>
